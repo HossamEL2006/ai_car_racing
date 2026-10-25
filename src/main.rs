@@ -8,25 +8,47 @@ use sdl3::video::Window;
 use std::time::Duration;
 use std::{iter, ops};
 
+#[derive(Clone, Copy)]
 struct Meter(f32);
 
+impl ops::Neg for Meter {
+    type Output = Meter;
+
+    fn neg(self) -> Self::Output {
+        Meter(-self.0)
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Coords {
     x: Meter,
     y: Meter,
 }
 
+#[derive(Clone, Copy)]
 struct Vector {
     x: Meter,
     y: Meter,
 }
 
-impl ops::Sub for &Coords {
+impl ops::Sub for Coords {
     type Output = Vector;
 
     fn sub(self, rhs: Self) -> Self::Output {
         Vector {
             x: Meter(self.x.0 - rhs.x.0),
             y: Meter(self.y.0 - rhs.y.0),
+        }
+    }
+}
+
+impl ops::Add<Vector> for Coords {
+    type Output = Coords;
+
+    fn add(self, rhs: Vector) -> Self::Output {
+        Coords {
+            x: Meter(self.x.0 + rhs.x.0),
+            y: Meter(self.y.0 + rhs.y.0),
         }
     }
 }
@@ -40,15 +62,15 @@ impl Coords {
     }
 
     fn as_fpoint(&self, camera: &Camera) -> FPoint {
-        let diff_from_camera_center: Vector = self - &camera.coords;
+        let diff_from_camera_center: Vector = *self - camera.coords;
         FPoint::new(
             (camera.width / 2) as f32 + (camera.px_per_meter as f32) * diff_from_camera_center.x.0,
-            (camera.height / 2) as f32 + (camera.px_per_meter as f32) * diff_from_camera_center.y.0,
+            (camera.height / 2) as f32 - (camera.px_per_meter as f32) * diff_from_camera_center.y.0,
         )
     }
 
     fn as_point(&self, camera: &Camera) -> Point {
-        let diff_from_camera_center: Vector = self - &camera.coords;
+        let diff_from_camera_center: Vector = *self - camera.coords;
         Point::new(
             (camera.width / 2) as i32
                 + ((camera.px_per_meter as f32) * diff_from_camera_center.x.0).round() as i32,
@@ -62,11 +84,68 @@ impl Coords {
     }
 }
 
+impl Vector {
+    fn init(x: f32, y: f32) -> Vector {
+        Vector {
+            x: Meter(x),
+            y: Meter(y),
+        }
+    }
+
+    fn orthogonal(&self) -> Vector {
+        Vector {
+            x: -self.y,
+            y: self.x,
+        }
+    }
+
+    fn norm(&self) -> Meter {
+        Meter((self.x.0.powi(2) + self.y.0.powi(0)).sqrt())
+    }
+
+    fn normalized(&self) -> Vector {
+        self.norm().0.recip() * *self
+    }
+}
+
+impl ops::Mul<Vector> for f32 {
+    type Output = Vector;
+
+    fn mul(self, mut rhs: Vector) -> Self::Output {
+        rhs.x.0 *= self;
+        rhs.y.0 *= self;
+        rhs
+    }
+}
+
 struct Camera {
     width: u32,
     height: u32,
     coords: Coords,
     px_per_meter: u32,
+}
+
+struct Car {
+    coords: Coords,
+    direction_vec: Vector,
+    length: Meter,
+    width: Meter,
+}
+
+impl Car {
+    fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
+        let corners: Vec<FPoint> = [(1., 1.), (-1., 1.), (-1., -1.), (1., -1.), (1., 1.)]
+            .into_iter()
+            .map(|(d1, d2)| {
+                self.coords
+                    + (d1 * (self.length.0 / 2.)) * self.direction_vec
+                    + (d2 * (self.width.0 / 2.)) * self.direction_vec.orthogonal()
+            })
+            .map(|coords| coords.as_fpoint(camera))
+            .collect();
+
+        canvas.draw_lines(corners.as_slice())
+    }
 }
 
 fn circular_points(n_points: u32, radius: f32) -> Vec<Coords> {
@@ -122,6 +201,14 @@ pub fn main() {
         px_per_meter: 14,
     };
 
+    // Initialize a car
+    let car: Car = Car {
+        coords: Coords::init(0., -16.5),
+        direction_vec: Vector::init(1., 0.),
+        length: Meter(4.5),
+        width: Meter(2.),
+    };
+
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
 
     'running: loop {
@@ -161,6 +248,10 @@ pub fn main() {
                 )
                 .unwrap();
         }
+
+        // Render the car
+        canvas.set_draw_color(Color::RGB(200, 0, 0));
+        car.render(&camera, &mut canvas).unwrap();
 
         // Apply the changes on the screen
         canvas.present();

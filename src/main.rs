@@ -11,6 +11,22 @@ use std::{iter, ops};
 #[derive(Clone, Copy)]
 struct Meter(f32);
 
+impl ops::Add for Meter {
+    type Output = Meter;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Meter(self.0 + rhs.0)
+    }
+}
+
+impl ops::Sub for Meter {
+    type Output = Meter;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Meter(self.0 - rhs.0)
+    }
+}
+
 impl ops::Neg for Meter {
     type Output = Meter;
 
@@ -36,8 +52,8 @@ impl ops::Sub for Coords {
 
     fn sub(self, rhs: Self) -> Self::Output {
         Vector {
-            x: Meter(self.x.0 - rhs.x.0),
-            y: Meter(self.y.0 - rhs.y.0),
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
         }
     }
 }
@@ -47,8 +63,8 @@ impl ops::Add<Vector> for Coords {
 
     fn add(self, rhs: Vector) -> Self::Output {
         Coords {
-            x: Meter(self.x.0 + rhs.x.0),
-            y: Meter(self.y.0 + rhs.y.0),
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
         }
     }
 }
@@ -62,20 +78,18 @@ impl Coords {
     }
 
     fn as_fpoint(&self, camera: &Camera) -> FPoint {
-        let diff_from_camera_center: Vector = *self - camera.coords;
+        let px_coords: Vector = (camera.px_per_meter as f32) * (*self - camera.coords);
         FPoint::new(
-            (camera.width / 2) as f32 + (camera.px_per_meter as f32) * diff_from_camera_center.x.0,
-            (camera.height / 2) as f32 - (camera.px_per_meter as f32) * diff_from_camera_center.y.0,
+            (camera.width / 2) as f32 + px_coords.x.0,
+            (camera.height / 2) as f32 - px_coords.y.0,
         )
     }
 
     fn as_point(&self, camera: &Camera) -> Point {
-        let diff_from_camera_center: Vector = *self - camera.coords;
+        let px_coords: Vector = (camera.px_per_meter as f32) * (*self - camera.coords);
         Point::new(
-            (camera.width / 2) as i32
-                + ((camera.px_per_meter as f32) * diff_from_camera_center.x.0).round() as i32,
-            (camera.height / 2) as i32
-                + ((camera.px_per_meter as f32) * diff_from_camera_center.y.0).round() as i32,
+            (camera.width / 2) as i32 + (px_coords.x.0).round() as i32,
+            (camera.height / 2) as i32 - (px_coords.y.0).round() as i32,
         )
     }
 
@@ -100,11 +114,22 @@ impl Vector {
     }
 
     fn norm(&self) -> Meter {
-        Meter((self.x.0.powi(2) + self.y.0.powi(0)).sqrt())
+        Meter((self.x.0.powi(2) + self.y.0.powi(2)).sqrt())
     }
 
     fn normalized(&self) -> Vector {
         self.norm().0.recip() * *self
+    }
+}
+
+impl ops::Add for Vector {
+    type Output = Vector;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Vector {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
     }
 }
 
@@ -130,9 +155,22 @@ struct Car {
     direction_vec: Vector,
     length: Meter,
     width: Meter,
+    acceleration: Vector,
+    velocity: Vector,
 }
 
 impl Car {
+    fn init(x: f32, y: f32, direction: Vector) -> Car {
+        Car {
+            coords: Coords::init(x, y),
+            direction_vec: direction.normalized(),
+            length: Meter(4.5),
+            width: Meter(2.),
+            acceleration: Vector::init(0., 0.),
+            velocity: Vector::init(0., 0.),
+        }
+    }
+
     fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
         let corners: Vec<FPoint> = [(1., 1.), (-1., 1.), (-1., -1.), (1., -1.), (1., 1.)]
             .into_iter()
@@ -141,10 +179,23 @@ impl Car {
                     + (d1 * (self.length.0 / 2.)) * self.direction_vec
                     + (d2 * (self.width.0 / 2.)) * self.direction_vec.orthogonal()
             })
-            .map(|coords| coords.as_fpoint(camera))
+            .map(|coords: Coords| coords.as_fpoint(camera))
             .collect();
 
         canvas.draw_lines(corners.as_slice())
+    }
+
+    fn set_acceleration(&mut self, acc: Vector) {
+        self.acceleration = acc
+    }
+
+    fn update_coords(&mut self, dt: f32) {
+        self.velocity = self.velocity + dt * self.acceleration;
+        let velocity_norm: f32 = self.velocity.norm().0;
+        if velocity_norm != 0. {
+            self.direction_vec = (1. / velocity_norm) * self.velocity;
+        }
+        self.coords = self.coords + dt * self.velocity;
     }
 }
 
@@ -171,6 +222,9 @@ fn circular_track(
 
 const SCREEN_WIDTH: u32 = 800;
 const SCREEN_HEIGHT: u32 = 600;
+
+const GAME_FPS: f32 = 60.0;
+const DT: f32 = GAME_FPS.recip();
 
 pub fn main() {
     // Initialize SDL
@@ -202,12 +256,8 @@ pub fn main() {
     };
 
     // Initialize a car
-    let car: Car = Car {
-        coords: Coords::init(0., -16.5),
-        direction_vec: Vector::init(1., 0.),
-        length: Meter(4.5),
-        width: Meter(2.),
-    };
+    let mut car: Car = Car::init(0., -16.5, Vector::init(1., 0.));
+    car.set_acceleration(Vector::init(50.0, 0.0));
 
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
 
@@ -223,6 +273,12 @@ pub fn main() {
                 _ => {}
             }
         }
+
+        // Update the car's position
+        if car.velocity.norm().0 > 10. {
+            car.set_acceleration(0.7 * car.velocity.orthogonal());
+        }
+        car.update_coords(DT);
 
         // Fill the entire screen with RGB(50, 50, 50)
         canvas.set_draw_color(Color::RGB(50, 50, 50));
@@ -257,6 +313,9 @@ pub fn main() {
         canvas.present();
 
         // Control the frame rate
-        std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+        std::thread::sleep(Duration::new(
+            0,
+            (1_000_000_000f32 / GAME_FPS).round() as u32,
+        ));
     }
 }

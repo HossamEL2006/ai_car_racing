@@ -1,4 +1,5 @@
 use core::f32;
+use rand::random_range;
 use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3::pixels::Color;
@@ -120,6 +121,19 @@ impl Vector {
     fn normalized(&self) -> Vector {
         self.norm().0.recip() * *self
     }
+
+    fn rotated(&self, theta: f32) -> Vector {
+        let cos_theta: f32 = theta.cos();
+        let sin_theta: f32 = theta.sin();
+
+        let x: f32 = self.x.0;
+        let y: f32 = self.y.0;
+
+        Vector {
+            x: Meter(x * cos_theta - y * sin_theta),
+            y: Meter(x * sin_theta + y * cos_theta),
+        }
+    }
 }
 
 impl ops::Add for Vector {
@@ -220,6 +234,75 @@ fn circular_track(
     (inner_border, outer_border)
 }
 
+fn random_path() -> Vec<Coords> {
+    fn choose_dir(right_weight: i32, left_weight: i32, straight_weight: i32) -> i32 {
+        let mut x: i32 = 0;
+        if right_weight + left_weight + straight_weight > 0 {
+            x = random_range(0..(right_weight + left_weight + straight_weight));
+        }
+
+        if x < right_weight {
+            1
+        } else if x < right_weight + left_weight {
+            -1
+        } else {
+            0
+        }
+    }
+
+    let turns_in_full_circle: i32 = 360 / 5;
+    let mut right_turn_steps: i32 = 3 * turns_in_full_circle / 2;
+    let mut left_turn_steps: i32 = turns_in_full_circle / 2;
+    let mut straight_steps: i32 = turns_in_full_circle;
+    let mut last_step: Option<i32> = None;
+    let mut consecutive_same: i32 = 0;
+    let mut path: Vec<Coords> = Vec::from([Coords::init(0., 0.)]);
+    let mut direction: Vector = Vector::init(1., 0.);
+
+    while right_turn_steps > 0 || left_turn_steps > 0 {
+        let mut right_coef: f32 = 1.;
+        let mut left_coef: f32 = 1.;
+        let mut straight_coef: f32 = 1.;
+        let modified_coef: f32 = (10. - 0.05 * consecutive_same as f32).max(0.);
+        if last_step == Some(1) {
+            right_coef = modified_coef;
+        }
+        if last_step == Some(-1) {
+            left_coef = modified_coef;
+        }
+        if last_step == Some(0) {
+            straight_coef = modified_coef;
+        }
+
+        let coef: i32 = choose_dir(
+            (right_coef * right_turn_steps as f32).round() as i32,
+            (left_coef * left_turn_steps as f32).round() as i32,
+            (straight_coef * straight_steps as f32).round() as i32,
+        );
+
+        if last_step.is_some_and(|last_step: i32| last_step == coef) {
+            consecutive_same += 1;
+        } else {
+            consecutive_same = 0;
+        }
+        last_step = Some(coef);
+
+        direction = direction.rotated(coef as f32 * 5.0f32.to_radians());
+
+        if coef == 1 {
+            right_turn_steps -= 1;
+        } else if coef == -1 {
+            left_turn_steps -= 1;
+        } else {
+            straight_steps -= 1;
+        }
+
+        path.push(*path.last().unwrap() + 0.5 * direction);
+    }
+
+    path
+}
+
 const SCREEN_WIDTH: u32 = 800;
 const SCREEN_HEIGHT: u32 = 600;
 
@@ -242,21 +325,19 @@ pub fn main() {
     let mut canvas: Canvas<Window> = window.into_canvas();
 
     // Generate the circuit
-    let n_points: u32 = 20;
-    let inner_radius: f32 = 13.0;
-    let outer_radius: f32 = 20.0;
-    let (inner_border, outer_border) = circular_track(n_points, inner_radius, outer_radius);
+    let random_path: Vec<Coords> = random_path();
+    // let (inner_border, outer_border) = circular_track(20, 13.0, 20.0);
 
     // Initialize a camera
     let camera: Camera = Camera {
         width: SCREEN_WIDTH,
         height: SCREEN_HEIGHT,
         coords: Coords::init(0., 0.),
-        px_per_meter: 14,
+        px_per_meter: 8,
     };
 
     // Initialize a car
-    let mut car: Car = Car::init(0., -16.5, Vector::init(1., 0.));
+    let mut car: Car = Car::init(0., 0., Vector::init(1., 0.));
     car.set_acceleration(Vector::init(50.0, 0.0));
 
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
@@ -275,10 +356,10 @@ pub fn main() {
         }
 
         // Update the car's position
-        if car.velocity.norm().0 > 10. {
-            car.set_acceleration(0.7 * car.velocity.orthogonal());
-        }
-        car.update_coords(DT);
+        // if car.velocity.norm().0 > 10. {
+        //     car.set_acceleration(0.7 * car.velocity.orthogonal());
+        // }
+        // car.update_coords(DT);
 
         // Fill the entire screen with RGB(50, 50, 50)
         canvas.set_draw_color(Color::RGB(50, 50, 50));
@@ -287,23 +368,34 @@ pub fn main() {
         // Draw the circuit
         canvas.set_draw_color(Color::RGB(200, 200, 200));
 
-        for (inn, out) in inner_border.iter().zip(outer_border.iter()) {
-            inn.render(&camera, &mut canvas).unwrap();
-            out.render(&camera, &mut canvas).unwrap();
-        }
+        canvas
+            .draw_lines(
+                random_path
+                    .iter()
+                    // .chain(iter::once(random_path.first().unwrap()))
+                    .map(|coord: &Coords| coord.as_fpoint(&camera))
+                    .collect::<Vec<FPoint>>()
+                    .as_slice(),
+            )
+            .unwrap();
 
-        for border in [&inner_border, &outer_border] {
-            canvas
-                .draw_lines(
-                    border
-                        .iter()
-                        .chain(iter::once(border.first().unwrap()))
-                        .map(|coord: &Coords| coord.as_fpoint(&camera))
-                        .collect::<Vec<FPoint>>()
-                        .as_slice(),
-                )
-                .unwrap();
-        }
+        // for (inn, out) in inner_border.iter().zip(outer_border.iter()) {
+        //     inn.render(&camera, &mut canvas).unwrap();
+        //     out.render(&camera, &mut canvas).unwrap();
+        // }
+
+        // for border in [&inner_border, &outer_border] {
+        //     canvas
+        //         .draw_lines(
+        //             border
+        //                 .iter()
+        //                 .chain(iter::once(border.first().unwrap()))
+        //                 .map(|coord: &Coords| coord.as_fpoint(&camera))
+        //                 .collect::<Vec<FPoint>>()
+        //                 .as_slice(),
+        //         )
+        //         .unwrap();
+        // }
 
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));

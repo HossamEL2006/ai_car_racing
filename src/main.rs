@@ -1,5 +1,7 @@
 use core::f32;
-use rand::random_range;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand_distr::{Distribution, Normal};
 use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3::pixels::Color;
@@ -9,7 +11,7 @@ use sdl3::video::Window;
 use std::time::Duration;
 use std::{iter, ops};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Meter(f32);
 
 impl ops::Add for Meter {
@@ -36,13 +38,13 @@ impl ops::Neg for Meter {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Coords {
     x: Meter,
     y: Meter,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Vector {
     x: Meter,
     y: Meter,
@@ -174,9 +176,9 @@ struct Car {
 }
 
 impl Car {
-    fn init(x: f32, y: f32, direction: Vector) -> Car {
+    fn init(coords: Coords, direction: Vector) -> Car {
         Car {
-            coords: Coords::init(x, y),
+            coords,
             direction_vec: direction.normalized(),
             length: Meter(4.5),
             width: Meter(2.),
@@ -213,94 +215,241 @@ impl Car {
     }
 }
 
-fn circular_points(n_points: u32, radius: f32) -> Vec<Coords> {
-    (0..n_points)
-        .map(|idx: u32| {
-            Coords::init(
-                radius * (idx as f32 * f32::consts::TAU / n_points as f32).cos(),
-                radius * (idx as f32 * f32::consts::TAU / n_points as f32).sin(),
-            )
-        })
-        .collect()
+fn render_coord_loop(
+    coords_loop: &[Coords],
+    camera: &Camera,
+    canvas: &mut Canvas<Window>,
+) -> Result<(), sdl3::Error> {
+    let mut coords_vec: Vec<FPoint> = coords_loop
+        .iter()
+        .map(|coord: &Coords| coord.as_fpoint(camera))
+        .collect();
+    coords_vec.push(coords_loop[0].as_fpoint(camera));
+    canvas.draw_lines(coords_vec.as_slice())
 }
 
-fn circular_track(
-    n_points: u32,
-    inner_radius: f32,
-    outer_radius: f32,
-) -> (Vec<Coords>, Vec<Coords>) {
-    let inner_border: Vec<Coords> = circular_points(n_points, inner_radius);
-    let outer_border: Vec<Coords> = circular_points(n_points, outer_radius);
-    (inner_border, outer_border)
+struct BezierPathConfig {
+    center: Coords,
+    n_anchors: i32,
+    mean_anchor_radius: f32,
+    stdev_anchor_radius: f32,
+    stdev_subanchor_angle_dev: f32,
 }
 
-fn random_path() -> Vec<Coords> {
-    fn choose_dir(right_weight: i32, left_weight: i32, straight_weight: i32) -> i32 {
-        let mut x: i32 = 0;
-        if right_weight + left_weight + straight_weight > 0 {
-            x = random_range(0..(right_weight + left_weight + straight_weight));
-        }
-
-        if x < right_weight {
-            1
-        } else if x < right_weight + left_weight {
-            -1
-        } else {
-            0
+impl Default for BezierPathConfig {
+    fn default() -> Self {
+        BezierPathConfig {
+            center: Coords::init(0., 0.),
+            n_anchors: 7,
+            mean_anchor_radius: 50.,
+            stdev_anchor_radius: 20.,
+            stdev_subanchor_angle_dev: 10.,
         }
     }
+}
 
-    let turns_in_full_circle: i32 = 360 / 5;
-    let mut right_turn_steps: i32 = 3 * turns_in_full_circle / 2;
-    let mut left_turn_steps: i32 = turns_in_full_circle / 2;
-    let mut straight_steps: i32 = turns_in_full_circle;
-    let mut last_step: Option<i32> = None;
-    let mut consecutive_same: i32 = 0;
-    let mut path: Vec<Coords> = Vec::from([Coords::init(0., 0.)]);
-    let mut direction: Vector = Vector::init(1., 0.);
+struct BezierPath {
+    coords: Vec<Coords>,
+    starting_point: Coords,
+    starting_direction: Vector,
+    center: Coords,                    // for debug rendering
+    anchor_triplets: Vec<[Coords; 3]>, // for debug rendering
+}
 
-    while right_turn_steps > 0 || left_turn_steps > 0 {
-        let mut right_coef: f32 = 1.;
-        let mut left_coef: f32 = 1.;
-        let mut straight_coef: f32 = 1.;
-        let modified_coef: f32 = (10. - 0.05 * consecutive_same as f32).max(0.);
-        if last_step == Some(1) {
-            right_coef = modified_coef;
-        }
-        if last_step == Some(-1) {
-            left_coef = modified_coef;
-        }
-        if last_step == Some(0) {
-            straight_coef = modified_coef;
-        }
+impl BezierPathConfig {
+    fn generate_path(&self, seed: Option<u64>) -> BezierPath {
+        fn sample_anchors(config: &BezierPathConfig, rng: &mut StdRng) -> Vec<Coords> {
+            let radius_normal_dist: Normal<f32> =
+                Normal::new(config.mean_anchor_radius, config.stdev_anchor_radius).unwrap();
+            let angle_dev_dist: Normal<f32> =
+                Normal::new(0., (360. / config.n_anchors as f32) * 0.2).unwrap();
 
-        let coef: i32 = choose_dir(
-            (right_coef * right_turn_steps as f32).round() as i32,
-            (left_coef * left_turn_steps as f32).round() as i32,
-            (straight_coef * straight_steps as f32).round() as i32,
-        );
+            (0..config.n_anchors)
+                .map(|n: i32| {
+                    let angle_dev: f32 = angle_dev_dist.sample(rng);
+                    n as f32 * (360. / config.n_anchors as f32) + angle_dev - 90.
+                    // -90 to start the first anchor at the bottom of the screen
+                })
+                .collect::<Vec<f32>>()
+                // To avoid borrowing issues `&mut rng`, we collect into a Vec first
+                .into_iter()
+                .map(|angle: f32| {
+                    let radius: f32 = radius_normal_dist
+                        .sample(rng)
+                        .max(config.mean_anchor_radius - 2. * config.stdev_anchor_radius)
+                        .max(0.);
 
-        if last_step.is_some_and(|last_step: i32| last_step == coef) {
-            consecutive_same += 1;
-        } else {
-            consecutive_same = 0;
-        }
-        last_step = Some(coef);
-
-        direction = direction.rotated(coef as f32 * 5.0f32.to_radians());
-
-        if coef == 1 {
-            right_turn_steps -= 1;
-        } else if coef == -1 {
-            left_turn_steps -= 1;
-        } else {
-            straight_steps -= 1;
+                    Coords::init(
+                        config.center.x.0 + radius * angle.to_radians().cos(),
+                        config.center.y.0 + radius * angle.to_radians().sin(),
+                    )
+                })
+                .collect()
         }
 
-        path.push(*path.last().unwrap() + 0.5 * direction);
+        fn sample_anchor_triplets(
+            config: &BezierPathConfig,
+            mut anchors: Vec<Coords>,
+            rng: &mut StdRng,
+        ) -> Vec<[Coords; 3]> {
+            let mut anchor_triplets: Vec<[Coords; 3]> = Vec::new();
+
+            let angle_dev_dist: Normal<f32> =
+                Normal::new(0., config.stdev_subanchor_angle_dev).unwrap();
+
+            let mut cyclic_anchors: Vec<Coords> = vec![*anchors.last().unwrap()];
+            anchors.push(anchors[0]);
+            cyclic_anchors.extend(anchors);
+
+            // Add first anchor to the end to make it circular
+
+            for (prev_anchor, anchor, next_anchor) in cyclic_anchors
+                .windows(3)
+                .map(|window: &[Coords]| (window[0], window[1], window[2]))
+            {
+                let angle: f32 = (anchor - config.center)
+                    .y
+                    .0
+                    .atan2((anchor - config.center).x.0)
+                    + f32::consts::FRAC_PI_2;
+                let angle_dev: f32 = angle_dev_dist.sample(rng);
+                let new_angle: f32 = angle + angle_dev.to_radians();
+
+                let track_dir_vector: Vector = Vector::init(new_angle.cos(), new_angle.sin());
+
+                let subanchor_dist_coef: f32 = 0.4;
+
+                let right_subanchor_dist: f32 = (anchor - prev_anchor).norm().0;
+                let right_subanchor: Coords =
+                    anchor + subanchor_dist_coef * (-right_subanchor_dist) * track_dir_vector;
+
+                let left_subanchor_dist: f32 = (next_anchor - anchor).norm().0;
+                let left_subanchor: Coords =
+                    anchor + subanchor_dist_coef * left_subanchor_dist * track_dir_vector;
+
+                anchor_triplets.push([right_subanchor, anchor, left_subanchor]);
+            }
+
+            anchor_triplets
+        }
+
+        fn anchor_triplets_to_control_points(anchor_triplets: &[[Coords; 3]]) -> Vec<[Coords; 4]> {
+            anchor_triplets
+                .windows(2)
+                .chain(iter::once(
+                    [
+                        *anchor_triplets.last().unwrap(),
+                        *anchor_triplets.first().unwrap(),
+                    ]
+                    .as_slice(),
+                ))
+                .map(|anch_pair: &[[Coords; 3]]| {
+                    let [_, center1, left1] = anch_pair[0];
+                    let [right2, center2, _] = anch_pair[1];
+
+                    [center1, left1, right2, center2]
+                })
+                .collect()
+        }
+
+        fn generate_bezier_curve(control_points: [Coords; 4], n: i32) -> Vec<Coords> {
+            (0..=n)
+                .map(|i: i32| {
+                    let t: f32 = i as f32 / n as f32;
+                    let one_minus_t: f32 = 1. - t;
+
+                    let p0: Coords = control_points[0];
+                    let p1: Coords = control_points[1];
+                    let p2: Coords = control_points[2];
+                    let p3: Coords = control_points[3];
+
+                    let x: f32 = one_minus_t.powi(3) * p0.x.0
+                        + 3. * one_minus_t.powi(2) * t * p1.x.0
+                        + 3. * one_minus_t * t.powi(2) * p2.x.0
+                        + t.powi(3) * p3.x.0;
+
+                    let y: f32 = one_minus_t.powi(3) * p0.y.0
+                        + 3. * one_minus_t.powi(2) * t * p1.y.0
+                        + 3. * one_minus_t * t.powi(2) * p2.y.0
+                        + t.powi(3) * p3.y.0;
+
+                    Coords::init(x, y)
+                })
+                .collect()
+        }
+
+        let mut coords: Vec<Coords> = Vec::new();
+
+        let mut rng: StdRng =
+            StdRng::seed_from_u64(seed.unwrap_or(rand::random_range(0..u64::MAX)));
+
+        let anchors: Vec<Coords> = sample_anchors(self, &mut rng);
+
+        let starting_point: Coords = anchors[0];
+
+        let anchor_triplets: Vec<[Coords; 3]> = sample_anchor_triplets(self, anchors, &mut rng);
+
+        let vec_control_points: Vec<[Coords; 4]> =
+            anchor_triplets_to_control_points(&anchor_triplets);
+
+        vec_control_points
+            .iter()
+            .for_each(|control_points: &[Coords; 4]| {
+                coords.extend(generate_bezier_curve(*control_points, 20))
+            });
+
+        let starting_direction = anchor_triplets[0][2] - anchor_triplets[0][0];
+
+        BezierPath {
+            coords,
+            starting_point,
+            starting_direction,
+            center: self.center,
+            anchor_triplets,
+        }
+    }
+}
+
+impl BezierPath {
+    fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
+        render_coord_loop(&self.coords, camera, canvas)
     }
 
-    path
+    fn render_debug_anchors(
+        &self,
+        camera: &Camera,
+        canvas: &mut Canvas<Window>,
+    ) -> Result<(), sdl3::Error> {
+        let curr_color: Color = canvas.draw_color();
+
+        for [right, center, left] in self.anchor_triplets.iter() {
+            canvas.set_draw_color(Color::RGB(0, 255, 0));
+            canvas
+                .draw_line(center.as_point(camera), left.as_point(camera))
+                .unwrap();
+            left.render(camera, canvas).unwrap();
+
+            canvas.set_draw_color(Color::RGB(255, 255, 255));
+            center.render(camera, canvas).unwrap();
+
+            canvas.set_draw_color(Color::RGB(0, 0, 255));
+            canvas
+                .draw_line(center.as_point(camera), right.as_point(camera))
+                .unwrap();
+            right.render(camera, canvas).unwrap();
+        }
+
+        // draw lines from the center of the track to main anchor points
+        for [_, center, _] in self.anchor_triplets.iter() {
+            canvas.set_draw_color(Color::RGB(255, 255, 0));
+            canvas
+                .draw_line(center.as_point(camera), self.center.as_point(camera))
+                .unwrap();
+        }
+
+        canvas.set_draw_color(curr_color);
+        Ok(())
+    }
 }
 
 const SCREEN_WIDTH: u32 = 800;
@@ -325,20 +474,23 @@ pub fn main() {
     let mut canvas: Canvas<Window> = window.into_canvas();
 
     // Generate the circuit
-    let random_path: Vec<Coords> = random_path();
-    // let (inner_border, outer_border) = circular_track(20, 13.0, 20.0);
+    let seed: u64 = rand::random_range(0..u64::MAX);
+    println!("Seed: {}", seed);
+    let path_config: BezierPathConfig = BezierPathConfig::default();
+    let path: BezierPath = path_config.generate_path(Some(seed));
+    let starting_point: Coords = path.starting_point;
+    let starting_direction: Vector = path.starting_direction;
+
+    // Initialize a car
+    let mut car: Car = Car::init(starting_point, starting_direction);
 
     // Initialize a camera
     let camera: Camera = Camera {
         width: SCREEN_WIDTH,
         height: SCREEN_HEIGHT,
         coords: Coords::init(0., 0.),
-        px_per_meter: 8,
+        px_per_meter: 4,
     };
-
-    // Initialize a car
-    let mut car: Car = Car::init(0., 0., Vector::init(1., 0.));
-    car.set_acceleration(Vector::init(50.0, 0.0));
 
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
 
@@ -355,47 +507,16 @@ pub fn main() {
             }
         }
 
-        // Update the car's position
-        // if car.velocity.norm().0 > 10. {
-        //     car.set_acceleration(0.7 * car.velocity.orthogonal());
-        // }
-        // car.update_coords(DT);
-
         // Fill the entire screen with RGB(50, 50, 50)
         canvas.set_draw_color(Color::RGB(50, 50, 50));
         canvas.clear();
 
         // Draw the circuit
         canvas.set_draw_color(Color::RGB(200, 200, 200));
+        path.render(&camera, &mut canvas).unwrap();
 
-        canvas
-            .draw_lines(
-                random_path
-                    .iter()
-                    // .chain(iter::once(random_path.first().unwrap()))
-                    .map(|coord: &Coords| coord.as_fpoint(&camera))
-                    .collect::<Vec<FPoint>>()
-                    .as_slice(),
-            )
-            .unwrap();
-
-        // for (inn, out) in inner_border.iter().zip(outer_border.iter()) {
-        //     inn.render(&camera, &mut canvas).unwrap();
-        //     out.render(&camera, &mut canvas).unwrap();
-        // }
-
-        // for border in [&inner_border, &outer_border] {
-        //     canvas
-        //         .draw_lines(
-        //             border
-        //                 .iter()
-        //                 .chain(iter::once(border.first().unwrap()))
-        //                 .map(|coord: &Coords| coord.as_fpoint(&camera))
-        //                 .collect::<Vec<FPoint>>()
-        //                 .as_slice(),
-        //         )
-        //         .unwrap();
-        // }
+        // Draw the anchors for debugging
+        path.render_debug_anchors(&camera, &mut canvas).unwrap();
 
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));

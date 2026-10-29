@@ -241,7 +241,7 @@ impl Default for BezierPathConfig {
         BezierPathConfig {
             center: Coords::init(0., 0.),
             n_anchors: 7,
-            mean_anchor_radius: 50.,
+            mean_anchor_radius: 60.,
             stdev_anchor_radius: 20.,
             stdev_subanchor_angle_dev: 10.,
         }
@@ -262,7 +262,7 @@ impl BezierPathConfig {
             let radius_normal_dist: Normal<f32> =
                 Normal::new(config.mean_anchor_radius, config.stdev_anchor_radius).unwrap();
             let angle_dev_dist: Normal<f32> =
-                Normal::new(0., (360. / config.n_anchors as f32) * 0.2).unwrap();
+                Normal::new(0., (360. / config.n_anchors as f32) * 0.15).unwrap();
 
             (0..config.n_anchors)
                 .map(|n: i32| {
@@ -353,7 +353,8 @@ impl BezierPathConfig {
         }
 
         fn generate_bezier_curve(control_points: [Coords; 4], n: i32) -> Vec<Coords> {
-            (0..=n)
+            // the last point is not included to avoid duplication between consecutive curves
+            (0..n)
                 .map(|i: i32| {
                     let t: f32 = i as f32 / n as f32;
                     let one_minus_t: f32 = 1. - t;
@@ -450,10 +451,51 @@ impl BezierPath {
         canvas.set_draw_color(curr_color);
         Ok(())
     }
+
+    fn generate_path_borders(&self, path_width: f32) -> (Vec<Coords>, Vec<Coords>) {
+        let half_width: f32 = path_width / 2.0;
+        let mut outer_border: Vec<Coords> = Vec::new();
+        let mut inner_border: Vec<Coords> = Vec::new();
+
+        // loop for every path point, and define a unit vector pointing in the direction of the path
+        // at that exact point
+        // use the point that comes just before and the one jsut after to make the vector
+
+        let cyclic_path_points: Vec<&Coords> = std::iter::once(self.coords.last().unwrap())
+            .chain(self.coords.iter())
+            .chain(std::iter::once(self.coords.first().unwrap()))
+            .collect();
+        for (i, (prev, curr, next)) in cyclic_path_points
+            .windows(3)
+            .map(|w| (w[0], w[1], w[2]))
+            .enumerate()
+        {
+            let direction: Vector = (*next - *prev).normalized();
+            let orthogonal: Vector = direction.orthogonal();
+            let outer_point: Coords = *curr + (-half_width) * orthogonal;
+            let inner_point: Coords = *curr + half_width * orthogonal;
+
+            outer_border.push(outer_point);
+
+            // the inner point is only included if it is not too close to other path points
+            let mut include_inner: bool = true;
+            for j in (i as i32 - 10)..=(i as i32 + 10) {
+                let idx: usize = j.rem_euclid(self.coords.len() as i32) as usize;
+                let point: &Coords = &self.coords[idx];
+                if *point != *curr && (*point - inner_point).norm().0 < half_width + 1e-4 {
+                    include_inner = false;
+                    break;
+                }
+            }
+            include_inner.then(|| inner_border.push(inner_point));
+        }
+
+        (outer_border, inner_border)
+    }
 }
 
-const SCREEN_WIDTH: u32 = 800;
-const SCREEN_HEIGHT: u32 = 600;
+const SCREEN_WIDTH: u32 = 1200;
+const SCREEN_HEIGHT: u32 = 900;
 
 const GAME_FPS: f32 = 60.0;
 const DT: f32 = GAME_FPS.recip();
@@ -476,6 +518,7 @@ pub fn main() {
     // Generate the circuit
     let seed: u64 = rand::random_range(0..u64::MAX);
     println!("Seed: {}", seed);
+    let debug: bool = false;
     let path_config: BezierPathConfig = BezierPathConfig::default();
     let path: BezierPath = path_config.generate_path(Some(seed));
     let starting_point: Coords = path.starting_point;
@@ -507,23 +550,40 @@ pub fn main() {
             }
         }
 
+        // Start rendering
+        let mut failed_rendering: bool = false;
+
         // Fill the entire screen with RGB(50, 50, 50)
         canvas.set_draw_color(Color::RGB(50, 50, 50));
         canvas.clear();
 
         // Draw the circuit
         canvas.set_draw_color(Color::RGB(200, 200, 200));
-        path.render(&camera, &mut canvas).unwrap();
+        if debug {
+            failed_rendering |= path.render(&camera, &mut canvas).is_err();
+        }
 
         // Draw the anchors for debugging
-        path.render_debug_anchors(&camera, &mut canvas).unwrap();
+        if debug {
+            failed_rendering |= path.render_debug_anchors(&camera, &mut canvas).is_err();
+        }
+
+        // Draw the path borders for debugging
+        let (outer_border, inner_border) = path.generate_path_borders(10.0);
+        failed_rendering |= render_coord_loop(&inner_border, &camera, &mut canvas).is_err();
+        failed_rendering |= render_coord_loop(&outer_border, &camera, &mut canvas).is_err();
 
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));
-        car.render(&camera, &mut canvas).unwrap();
+        failed_rendering |= car.render(&camera, &mut canvas).is_err();
 
         // Apply the changes on the screen
         canvas.present();
+
+        // Detect failed rendering attempts
+        if failed_rendering {
+            eprintln!("Warning: Failed rendering one or more elements.");
+        }
 
         // Control the frame rate
         std::thread::sleep(Duration::new(

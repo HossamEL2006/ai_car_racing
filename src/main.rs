@@ -502,8 +502,81 @@ impl BezierPath {
     }
 }
 
-const SCREEN_WIDTH: u32 = 1200;
-const SCREEN_HEIGHT: u32 = 900;
+fn draw_circle(
+    canvas: &mut Canvas<Window>,
+    x: i16,
+    y: i16,
+    radius: i16,
+    color: Color,
+) -> Result<(), sdl3::Error> {
+    canvas.set_draw_color(color);
+    let segments: i32 = 36;
+    for i in 0..segments {
+        let theta1: f32 = (i as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
+        let theta2: f32 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
+        let x1: i16 = x + (radius as f32 * theta1.cos()) as i16;
+        let y1: i16 = y + (radius as f32 * theta1.sin()) as i16;
+        let x2: i16 = x + (radius as f32 * theta2.cos()) as i16;
+        let y2: i16 = y + (radius as f32 * theta2.sin()) as i16;
+        canvas.draw_line((x1 as f32, y1 as f32), (x2 as f32, y2 as f32))?;
+    }
+    Ok(())
+}
+
+fn draw_disc(
+    canvas: &mut Canvas<Window>,
+    x: i16,
+    y: i16,
+    radius: i16,
+    color: Color,
+) -> Result<(), sdl3::Error> {
+    // Loop through every pixel in the bounding square of the circle
+    canvas.set_draw_color(color);
+    for i in -radius..=radius {
+        for j in -radius..=radius {
+            if i * i + j * j <= radius * radius {
+                canvas.draw_point((x as f32 + i as f32, y as f32 + j as f32))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_joystick(
+    position: (u32, u32),
+    direction: Vector,
+    canvas: &mut Canvas<Window>,
+) -> Result<(), sdl3::Error> {
+    let (x, y) = position;
+    draw_circle(
+        canvas,
+        x as i16,
+        y as i16,
+        OUTER_JOYSTICK_RADIUS as i16,
+        Color::RGB(200, 200, 200),
+    )?;
+    let dir_x: i16 = (x as f32 + direction.x.0 * INNER_JOYSTICK_RADIUS as f32) as i16;
+    let dir_y: i16 = (y as f32 + direction.y.0 * INNER_JOYSTICK_RADIUS as f32) as i16;
+    draw_disc(
+        canvas,
+        dir_x,
+        dir_y,
+        INNER_JOYSTICK_RADIUS as i16,
+        Color::RGB(175, 175, 175),
+    )?;
+    Ok(())
+}
+
+const CAMERA_WIDTH: u32 = 1200;
+const CAMERA_HEIGHT: u32 = 900;
+const SIDE_PANEL_WIDTH: u32 = 400;
+
+const SCREEN_WIDTH: u32 = CAMERA_WIDTH + SIDE_PANEL_WIDTH;
+const SCREEN_HEIGHT: u32 = CAMERA_HEIGHT;
+
+const JOYSTICK_POSITION: (u32, u32) = (CAMERA_WIDTH + SIDE_PANEL_WIDTH / 2, CAMERA_HEIGHT / 3);
+const INNER_JOYSTICK_RADIUS: u32 = 50;
+const OUTER_JOYSTICK_RADIUS: u32 = 125;
 
 const GAME_FPS: f32 = 60.0;
 const DT: f32 = GAME_FPS.recip();
@@ -541,19 +614,22 @@ pub fn main() {
 
     // Initialize a camera
     let fix_camera: Camera = Camera {
-        width: SCREEN_WIDTH,
-        height: SCREEN_HEIGHT,
+        width: CAMERA_WIDTH,
+        height: CAMERA_HEIGHT,
         coords: Coords::init(0., 0.),
-        px_per_meter: 4,
+        px_per_meter: 5,
     };
 
     let mut car_camera: Camera = Camera {
-        width: SCREEN_WIDTH,
-        height: SCREEN_HEIGHT,
+        width: CAMERA_WIDTH,
+        height: CAMERA_HEIGHT,
         coords: car.coords,
-        px_per_meter: (SCREEN_WIDTH as f32 / (car.length.0 / 0.05)).round() as u32,
+        px_per_meter: (CAMERA_WIDTH as f32 / (car.length.0 / 0.05)).round() as u32,
         // car length is 5% of the screen width
     };
+
+    // Initialize the joystick direction
+    let mut joystick_direction: Vector = Vector::init(0., 0.);
 
     // Initialize the TTF context for rendering text
     let ttf_context: sdl3::ttf::Sdl3TtfContext = sdl3::ttf::init().unwrap();
@@ -654,6 +730,18 @@ pub fn main() {
                 .copy(&hold_space_texture, None, hold_space_rect)
                 .is_err();
         }
+
+        // Draw a seperating line between the game area and the side panel
+        canvas.set_draw_color(Color::RGB(100, 100, 100));
+        let (x1, y1) = (CAMERA_WIDTH, 0);
+        let (x2, y2) = (CAMERA_WIDTH, CAMERA_HEIGHT);
+        failed_rendering |= canvas
+            .draw_line((x1 as f32, y1 as f32), (x2 as f32, y2 as f32))
+            .is_err();
+
+        // Render the joystick
+        failed_rendering |=
+            render_joystick(JOYSTICK_POSITION, joystick_direction, &mut canvas).is_err();
 
         // Apply the changes on the screen
         canvas.present();

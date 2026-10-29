@@ -1,16 +1,17 @@
 use core::f32;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
-use sdl3::event::Event;
-use sdl3::keyboard::Keycode;
-use sdl3::pixels::Color;
-use sdl3::rect::{Point, Rect};
-use sdl3::render::{Canvas, FPoint};
-use sdl3::ttf::Font;
-use sdl3::video::Window;
-use std::time::Duration;
-use std::{iter, ops};
+use sdl3::{
+    event::Event,
+    joystick::Joystick,
+    keyboard::{KeyboardState, Keycode, Scancode},
+    pixels::Color,
+    rect,
+    render::{self, Canvas},
+    ttf,
+    video::{Window, WindowContext},
+};
+use std::{iter, ops, time::Duration};
 
 #[derive(Clone, Copy, PartialEq)]
 struct Meter(f32);
@@ -81,24 +82,24 @@ impl Coords {
         }
     }
 
-    fn as_fpoint(&self, camera: &Camera) -> FPoint {
+    fn as_fpoint(&self, camera: &Camera) -> render::FPoint {
         let px_coords: Vector = (camera.px_per_meter as f32) * (*self - camera.coords);
-        FPoint::new(
+        render::FPoint::new(
             (camera.width / 2) as f32 + px_coords.x.0,
             (camera.height / 2) as f32 - px_coords.y.0,
         )
     }
 
-    fn as_point(&self, camera: &Camera) -> Point {
+    fn as_point(&self, camera: &Camera) -> rect::Point {
         let px_coords: Vector = (camera.px_per_meter as f32) * (*self - camera.coords);
-        Point::new(
+        rect::Point::new(
             (camera.width / 2) as i32 + (px_coords.x.0).round() as i32,
             (camera.height / 2) as i32 - (px_coords.y.0).round() as i32,
         )
     }
 
     fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
-        canvas.draw_rect(Rect::from_center(self.as_point(camera), 5, 5))
+        canvas.draw_rect(rect::Rect::from_center(self.as_point(camera), 5, 5))
     }
 }
 
@@ -189,7 +190,7 @@ impl Car {
     }
 
     fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
-        let corners: Vec<FPoint> = [(1., 1.), (-1., 1.), (-1., -1.), (1., -1.), (1., 1.)]
+        let corners: Vec<render::FPoint> = [(1., 1.), (-1., 1.), (-1., -1.), (1., -1.), (1., 1.)]
             .into_iter()
             .map(|(d1, d2)| {
                 self.coords
@@ -221,7 +222,7 @@ fn render_coord_loop(
     camera: &Camera,
     canvas: &mut Canvas<Window>,
 ) -> Result<(), sdl3::Error> {
-    let mut coords_vec: Vec<FPoint> = coords_loop
+    let mut coords_vec: Vec<render::FPoint> = coords_loop
         .iter()
         .map(|coord: &Coords| coord.as_fpoint(camera))
         .collect();
@@ -464,10 +465,6 @@ impl BezierPath {
         let mut outer_border: Vec<Coords> = Vec::new();
         let mut inner_border: Vec<Coords> = Vec::new();
 
-        // loop for every path point, and define a unit vector pointing in the direction of the path
-        // at that exact point
-        // use the point that comes just before and the one jsut after to make the vector
-
         let cyclic_path_points: Vec<&Coords> = std::iter::once(self.coords.last().unwrap())
             .chain(self.coords.iter())
             .chain(std::iter::once(self.coords.first().unwrap()))
@@ -530,7 +527,6 @@ fn draw_disc(
     radius: i16,
     color: Color,
 ) -> Result<(), sdl3::Error> {
-    // Loop through every pixel in the bounding square of the circle
     canvas.set_draw_color(color);
     for i in -radius..=radius {
         for j in -radius..=radius {
@@ -555,8 +551,13 @@ fn render_joystick(
         OUTER_JOYSTICK_RADIUS as i16,
         Color::RGB(200, 200, 200),
     )?;
-    let dir_x: i16 = (x as f32 + direction.x.0 * INNER_JOYSTICK_RADIUS as f32) as i16;
-    let dir_y: i16 = (y as f32 + direction.y.0 * INNER_JOYSTICK_RADIUS as f32) as i16;
+    // make the inner joystick barely able to move out of the outer circle, just to give the general feeling of pushing a joystick to max
+    let dir_x: i16 = (x as f32
+        + direction.x.0 * (OUTER_JOYSTICK_RADIUS as f32 - 0.8 * INNER_JOYSTICK_RADIUS as f32))
+        as i16;
+    let dir_y: i16 = (y as f32
+        + direction.y.0 * (OUTER_JOYSTICK_RADIUS as f32 - 0.8 * INNER_JOYSTICK_RADIUS as f32))
+        as i16;
     draw_disc(
         canvas,
         dir_x,
@@ -564,6 +565,52 @@ fn render_joystick(
         INNER_JOYSTICK_RADIUS as i16,
         Color::RGB(175, 175, 175),
     )?;
+    Ok(())
+}
+
+struct TextRenderInfo<'a> {
+    texture: render::Texture<'a>,
+    rect: rect::Rect,
+}
+
+impl TextRenderInfo<'_> {
+    fn set_pos(&mut self, x: i32, y: i32) {
+        self.rect.set_x(x);
+        self.rect.set_y(y);
+    }
+
+    fn width(&self) -> i32 {
+        self.rect.width() as i32
+    }
+
+    fn height(&self) -> i32 {
+        self.rect.height() as i32
+    }
+}
+
+fn text_render_info<'a>(
+    text: &str,
+    font: &ttf::Font,
+    texture_creator: &'a render::TextureCreator<WindowContext>,
+) -> TextRenderInfo<'a> {
+    let surface = font
+        .render(text)
+        .blended(Color::RGB(255, 255, 255))
+        .map_err(|e: ttf::FontError| e.to_string())
+        .unwrap();
+    let texture = texture_creator
+        .create_texture_from_surface(&surface)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let rect = rect::Rect::new(0, 0, surface.width(), surface.height());
+    TextRenderInfo { texture, rect }
+}
+
+fn render_text(
+    canvas: &mut Canvas<Window>,
+    render_info: &TextRenderInfo,
+) -> Result<(), sdl3::Error> {
+    canvas.copy(&render_info.texture, None, render_info.rect)?;
     Ok(())
 }
 
@@ -576,13 +623,14 @@ const SCREEN_HEIGHT: u32 = CAMERA_HEIGHT;
 
 const JOYSTICK_POSITION: (u32, u32) = (CAMERA_WIDTH + SIDE_PANEL_WIDTH / 2, CAMERA_HEIGHT / 3);
 const INNER_JOYSTICK_RADIUS: u32 = 50;
-const OUTER_JOYSTICK_RADIUS: u32 = 125;
+const OUTER_JOYSTICK_RADIUS: u32 = 100;
 
 const GAME_FPS: f32 = 60.0;
 const DT: f32 = GAME_FPS.recip();
 
 pub fn main() {
     // Initialize SDL
+    sdl3::hint::set("SDL_RENDER_VSYNC", "1");
     let sdl_context: sdl3::Sdl = sdl3::init().unwrap();
     let video_subsystem: sdl3::VideoSubsystem = sdl_context.video().unwrap();
 
@@ -612,7 +660,7 @@ pub fn main() {
     // Initialize a car
     let mut car: Car = Car::init(starting_point, starting_direction);
 
-    // Initialize a camera
+    // Initialize the cameras
     let fix_camera: Camera = Camera {
         width: CAMERA_WIDTH,
         height: CAMERA_HEIGHT,
@@ -631,26 +679,50 @@ pub fn main() {
     // Initialize the joystick direction
     let mut joystick_direction: Vector = Vector::init(0., 0.);
 
+    // Initalize connection with a controller joystick
+    let mut joystick: Option<Joystick> = None;
+    if let Ok(joystick_subsystem) = sdl_context.joystick() {
+        println!("Joystick subsystem initialized");
+        joystick_subsystem.set_joystick_events_enabled(true);
+        if let Some(fst_joystick_id) = joystick_subsystem
+            .joysticks()
+            .ok()
+            .and_then(|joysticks| joysticks.first().cloned())
+        {
+            joystick = joystick_subsystem
+                .open(fst_joystick_id)
+                .ok()
+                .filter(|js: &Joystick| js.num_axes() >= 2);
+        }
+    }
+
     // Initialize the TTF context for rendering text
-    let ttf_context: sdl3::ttf::Sdl3TtfContext = sdl3::ttf::init().unwrap();
-    let font: Font = ttf_context
+    let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
+    let font: ttf::Font = ttf_context
         .load_font("assets/Basic-Regular.ttf", 25.)
         .unwrap();
+    let texture_creator: render::TextureCreator<WindowContext> = canvas.texture_creator();
 
-    // Render text surface and texture for displaying instructions
-    let hold_space_surf = font
-        .render("HOLD SPACE TO FOLLOW CAR")
-        .blended(Color::RGB(255, 255, 255))
-        .map_err(|e: sdl3::ttf::FontError| e.to_string())
-        .unwrap();
-    let texture_creator = canvas.texture_creator();
-    let hold_space_texture = texture_creator
-        .create_texture_from_surface(&hold_space_surf)
-        .map_err(|e| e.to_string())
-        .unwrap();
-    let hold_space_rect: Rect =
-        sdl3::rect::Rect::new(10, 10, hold_space_surf.width(), hold_space_surf.height());
+    // Instantiate text render info for displaying instructions and information
+    let mut hold_space_render_info: TextRenderInfo<'_> =
+        text_render_info("HOLD SPACE TO FOLLOW CAR", &font, &texture_creator);
+    // TODO : Implement position specification for `text_render_info` to avoid having to
+    //        call `set_pos` separately
+    hold_space_render_info.set_pos(10, 10);
 
+    let mut js_name_render_info: TextRenderInfo<'_> =
+        text_render_info("No controller detected at startup", &font, &texture_creator);
+    if let Some(js) = &joystick {
+        println!("Joystick connected: {:?}", js.name());
+        js_name_render_info = text_render_info(
+            &format!("Controller: {}", js.name()),
+            &font,
+            &texture_creator,
+        );
+    }
+    js_name_render_info.set_pos(SCREEN_WIDTH as i32 - js_name_render_info.width() - 10, 10);
+
+    // Initialize the event pump for handling SDL events
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
 
     'running: loop {
@@ -662,13 +734,18 @@ pub fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                _ => {}
+                _ => (),
             }
         }
 
-        let keyboard_state = event_pump.keyboard_state();
-        let space_pressed: bool =
-            keyboard_state.is_scancode_pressed(sdl3::keyboard::Scancode::Space);
+        let keyboard_state: KeyboardState<'_> = event_pump.keyboard_state();
+        let space_pressed: bool = keyboard_state.is_scancode_pressed(Scancode::Space);
+
+        if let Some(js) = &joystick {
+            let axis_0: f32 = js.axis(0).unwrap_or(0) as f32 / 32768.0;
+            let axis_1: f32 = js.axis(1).unwrap_or(0) as f32 / 32768.0;
+            joystick_direction = Vector::init(axis_0, axis_1);
+        }
 
         // Update the car's position and rotation
         let slowed_counter: usize = (game_tick_counter / 5) as usize;
@@ -726,14 +803,15 @@ pub fn main() {
 
         // Write "HOLD SPACE TO FOLLOW CAR"
         if !space_pressed {
-            failed_rendering |= canvas
-                .copy(&hold_space_texture, None, hold_space_rect)
-                .is_err();
+            failed_rendering |= render_text(&mut canvas, &hold_space_render_info).is_err();
         }
+
+        // Render the joystick name if available
+        failed_rendering |= render_text(&mut canvas, &js_name_render_info).is_err();
 
         // Draw a seperating line between the game area and the side panel
         canvas.set_draw_color(Color::RGB(100, 100, 100));
-        let (x1, y1) = (CAMERA_WIDTH, 0);
+        let (x1, y1) = (CAMERA_WIDTH, 0u32);
         let (x2, y2) = (CAMERA_WIDTH, CAMERA_HEIGHT);
         failed_rendering |= canvas
             .draw_line((x1 as f32, y1 as f32), (x2 as f32, y2 as f32))

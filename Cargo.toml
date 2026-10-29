@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-sdl3 = { version = "0.20.0", features = ["build-from-source"] }
+sdl3 = { version = "0.20.0", features = ["build-from-source", "ttf"] }
 rand = "0.10.3"
 rand_distr = "0.6.0"

@@ -7,6 +7,7 @@ use sdl3::keyboard::Keycode;
 use sdl3::pixels::Color;
 use sdl3::rect::{Point, Rect};
 use sdl3::render::{Canvas, FPoint};
+use sdl3::ttf::Font;
 use sdl3::video::Window;
 use std::time::Duration;
 use std::{iter, ops};
@@ -228,12 +229,14 @@ fn render_coord_loop(
     canvas.draw_lines(coords_vec.as_slice())
 }
 
+#[derive(Clone)]
 struct BezierPathConfig {
     center: Coords,
     n_anchors: i32,
     mean_anchor_radius: f32,
     stdev_anchor_radius: f32,
     stdev_subanchor_angle_dev: f32,
+    points_per_bezier_curve: usize,
 }
 
 impl Default for BezierPathConfig {
@@ -244,6 +247,7 @@ impl Default for BezierPathConfig {
             mean_anchor_radius: 60.,
             stdev_anchor_radius: 20.,
             stdev_subanchor_angle_dev: 10.,
+            points_per_bezier_curve: 30,
         }
     }
 }
@@ -252,7 +256,7 @@ struct BezierPath {
     coords: Vec<Coords>,
     starting_point: Coords,
     starting_direction: Vector,
-    center: Coords,                    // for debug rendering
+    config: BezierPathConfig,          // for debug rendering
     anchor_triplets: Vec<[Coords; 3]>, // for debug rendering
 }
 
@@ -352,10 +356,10 @@ impl BezierPathConfig {
                 .collect()
         }
 
-        fn generate_bezier_curve(control_points: [Coords; 4], n: i32) -> Vec<Coords> {
+        fn generate_bezier_curve(control_points: [Coords; 4], n: usize) -> Vec<Coords> {
             // the last point is not included to avoid duplication between consecutive curves
             (0..n)
-                .map(|i: i32| {
+                .map(|i: usize| {
                     let t: f32 = i as f32 / n as f32;
                     let one_minus_t: f32 = 1. - t;
 
@@ -396,7 +400,10 @@ impl BezierPathConfig {
         vec_control_points
             .iter()
             .for_each(|control_points: &[Coords; 4]| {
-                coords.extend(generate_bezier_curve(*control_points, 20))
+                coords.extend(generate_bezier_curve(
+                    *control_points,
+                    self.points_per_bezier_curve,
+                ))
             });
 
         let starting_direction = anchor_triplets[0][2] - anchor_triplets[0][0];
@@ -405,7 +412,7 @@ impl BezierPathConfig {
             coords,
             starting_point,
             starting_direction,
-            center: self.center,
+            config: self.clone(),
             anchor_triplets,
         }
     }
@@ -444,7 +451,7 @@ impl BezierPath {
         for [_, center, _] in self.anchor_triplets.iter() {
             canvas.set_draw_color(Color::RGB(255, 255, 0));
             canvas
-                .draw_line(center.as_point(camera), self.center.as_point(camera))
+                .draw_line(center.as_point(camera), self.config.center.as_point(camera))
                 .unwrap();
         }
 
@@ -479,7 +486,8 @@ impl BezierPath {
 
             // the inner point is only included if it is not too close to other path points
             let mut include_inner: bool = true;
-            for j in (i as i32 - 10)..=(i as i32 + 10) {
+            let points_per_curve: i32 = self.config.points_per_bezier_curve as i32;
+            for j in (i as i32 - points_per_curve)..=(i as i32 + points_per_curve) {
                 let idx: usize = j.rem_euclid(self.coords.len() as i32) as usize;
                 let point: &Coords = &self.coords[idx];
                 if *point != *curr && (*point - inner_point).norm().0 < half_width + 1e-4 {
@@ -515,12 +523,16 @@ pub fn main() {
     // Transform the window into a canvas
     let mut canvas: Canvas<Window> = window.into_canvas();
 
+    // Setup a game tick counter
+    let mut game_tick_counter: u32 = 0;
+
     // Generate the circuit
     let seed: u64 = rand::random_range(0..u64::MAX);
     println!("Seed: {}", seed);
     let debug: bool = false;
     let path_config: BezierPathConfig = BezierPathConfig::default();
     let path: BezierPath = path_config.generate_path(Some(seed));
+    let (outer_border, inner_border) = path.generate_path_borders(10.0);
     let starting_point: Coords = path.starting_point;
     let starting_direction: Vector = path.starting_direction;
 
@@ -528,12 +540,40 @@ pub fn main() {
     let mut car: Car = Car::init(starting_point, starting_direction);
 
     // Initialize a camera
-    let camera: Camera = Camera {
+    let fix_camera: Camera = Camera {
         width: SCREEN_WIDTH,
         height: SCREEN_HEIGHT,
         coords: Coords::init(0., 0.),
         px_per_meter: 4,
     };
+
+    let mut car_camera: Camera = Camera {
+        width: SCREEN_WIDTH,
+        height: SCREEN_HEIGHT,
+        coords: car.coords,
+        px_per_meter: (SCREEN_WIDTH as f32 / (car.length.0 / 0.05)).round() as u32,
+        // car length is 5% of the screen width
+    };
+
+    // Initialize the TTF context for rendering text
+    let ttf_context: sdl3::ttf::Sdl3TtfContext = sdl3::ttf::init().unwrap();
+    let font: Font = ttf_context
+        .load_font("assets/Basic-Regular.ttf", 25.)
+        .unwrap();
+
+    // Render text surface and texture for displaying instructions
+    let hold_space_surf = font
+        .render("HOLD SPACE TO FOLLOW CAR")
+        .blended(Color::RGB(255, 255, 255))
+        .map_err(|e: sdl3::ttf::FontError| e.to_string())
+        .unwrap();
+    let texture_creator = canvas.texture_creator();
+    let hold_space_texture = texture_creator
+        .create_texture_from_surface(&hold_space_surf)
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let hold_space_rect: Rect =
+        sdl3::rect::Rect::new(10, 10, hold_space_surf.width(), hold_space_surf.height());
 
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
 
@@ -550,8 +590,38 @@ pub fn main() {
             }
         }
 
+        let keyboard_state = event_pump.keyboard_state();
+        let space_pressed: bool =
+            keyboard_state.is_scancode_pressed(sdl3::keyboard::Scancode::Space);
+
+        // Update the car's position and rotation
+        let slowed_counter: usize = (game_tick_counter / 5) as usize;
+        car.coords = path.coords[slowed_counter % path.coords.len()];
+        let direction: Vector = {
+            let prev_index: usize =
+                (slowed_counter as i32 - 1).rem_euclid(path.coords.len() as i32) as usize;
+            let next_index: usize = (slowed_counter + 1) % path.coords.len();
+            let prev_point: Coords = path.coords[prev_index];
+            let next_point: Coords = path.coords[next_index];
+            Vector::init(
+                next_point.x.0 - prev_point.x.0,
+                next_point.y.0 - prev_point.y.0,
+            )
+        }
+        .normalized();
+        car.direction_vec = direction;
+
+        // Update cameras
+        car_camera.coords = car.coords;
+
         // Start rendering
         let mut failed_rendering: bool = false;
+
+        // Determine which camera to use for rendering
+        let mut current_camera: &Camera = &fix_camera;
+        if space_pressed {
+            current_camera = &car_camera;
+        }
 
         // Fill the entire screen with RGB(50, 50, 50)
         canvas.set_draw_color(Color::RGB(50, 50, 50));
@@ -560,22 +630,30 @@ pub fn main() {
         // Draw the circuit
         canvas.set_draw_color(Color::RGB(200, 200, 200));
         if debug {
-            failed_rendering |= path.render(&camera, &mut canvas).is_err();
+            failed_rendering |= path.render(current_camera, &mut canvas).is_err();
         }
 
         // Draw the anchors for debugging
         if debug {
-            failed_rendering |= path.render_debug_anchors(&camera, &mut canvas).is_err();
+            failed_rendering |= path
+                .render_debug_anchors(current_camera, &mut canvas)
+                .is_err();
         }
 
         // Draw the path borders for debugging
-        let (outer_border, inner_border) = path.generate_path_borders(10.0);
-        failed_rendering |= render_coord_loop(&inner_border, &camera, &mut canvas).is_err();
-        failed_rendering |= render_coord_loop(&outer_border, &camera, &mut canvas).is_err();
+        failed_rendering |= render_coord_loop(&inner_border, current_camera, &mut canvas).is_err();
+        failed_rendering |= render_coord_loop(&outer_border, current_camera, &mut canvas).is_err();
 
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));
-        failed_rendering |= car.render(&camera, &mut canvas).is_err();
+        failed_rendering |= car.render(current_camera, &mut canvas).is_err();
+
+        // Write "HOLD SPACE TO FOLLOW CAR"
+        if !space_pressed {
+            failed_rendering |= canvas
+                .copy(&hold_space_texture, None, hold_space_rect)
+                .is_err();
+        }
 
         // Apply the changes on the screen
         canvas.present();
@@ -590,5 +668,7 @@ pub fn main() {
             0,
             (1_000_000_000f32 / GAME_FPS).round() as u32,
         ));
+
+        game_tick_counter += 1;
     }
 }

@@ -183,6 +183,7 @@ impl Vector {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum RenderVectorError {
     SdlError(sdl3::Error),
@@ -240,18 +241,16 @@ impl Car {
         }
     }
 
-    fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), ()> {
-        let corners: Vec<render::FPoint> = [(1., 1.), (-1., 1.), (-1., -1.), (1., -1.), (1., 1.)]
-            .into_iter()
-            .map(|(d1, d2)| {
-                self.coords
-                    + (d1 * (self.length.0 / 2.)) * self.direction_vec
-                    + (d2 * (self.width.0 / 2.)) * self.direction_vec.orthogonal()
-            })
-            .map(|coords: Coords| coords.as_fpoint(camera))
-            .collect();
+    fn corners_coords(&self) -> [Coords; 4] {
+        [(1., 1.), (-1., 1.), (-1., -1.), (1., -1.)].map(|(d1, d2)| {
+            self.coords
+                + (d1 * (self.length.0 / 2.)) * self.direction_vec
+                + (d2 * (self.width.0 / 2.)) * self.direction_vec.orthogonal()
+        })
+    }
 
-        canvas.draw_lines(corners.as_slice()).map_err(|_| ())
+    fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
+        render_polygon(self.corners_coords().as_slice(), camera, canvas)
     }
 
     fn render_debug_vectors(
@@ -298,11 +297,15 @@ impl Car {
         self.engine_acc = acc
     }
 
+    fn set_friction_factor(&mut self, friction_factor: f32) {
+        self.friction_factor = friction_factor;
+    }
+
     fn update_coords(&mut self, dt: f32) {
         let friction_acc = -self.friction_factor * self.velocity;
         self.velocity = self.velocity + dt * self.engine_acc + dt * friction_acc;
         let velocity_norm: f32 = self.velocity.norm().0;
-        if velocity_norm != 0. {
+        if velocity_norm > 1e-4 {
             self.direction_vec = (1. / velocity_norm) * self.velocity;
         }
         self.coords = self.coords + dt * self.velocity;
@@ -400,10 +403,27 @@ fn fill_polygon(
     Ok(())
 }
 
+fn inside_polygon(point: Coords, polygon: &[Coords]) -> bool {
+    let mut inside: bool = false;
+    let n: usize = polygon.len();
+    let mut j: usize = n - 1;
+    for i in 0..n {
+        let pi: Coords = polygon[i];
+        let pj: Coords = polygon[j];
+        if ((pi.y.0 > point.y.0) != (pj.y.0 > point.y.0))
+            && (point.x.0 < (pj.x.0 - pi.x.0) * (point.y.0 - pi.y.0) / (pj.y.0 - pi.y.0) + pi.x.0)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 #[derive(Clone)]
 struct BezierPathConfig {
     center: Coords,
-    n_anchors: i32,
+    n_anchors: usize,
     mean_anchor_radius: f32,
     stdev_anchor_radius: f32,
     stdev_subanchor_angle_dev: f32,
@@ -414,11 +434,11 @@ impl BezierPathConfig {
     fn init_circular() -> Self {
         BezierPathConfig {
             center: Coords::init(0., 0.),
-            n_anchors: 12,
-            mean_anchor_radius: 50.,
+            n_anchors: N_ANCHORS,
+            mean_anchor_radius: MEAN_ANCHOR_RADIUS,
             stdev_anchor_radius: 0.,
             stdev_subanchor_angle_dev: 0.,
-            points_per_bezier_curve: 20,
+            points_per_bezier_curve: POINTS_PER_BEZIER_CURVE,
         }
     }
 }
@@ -427,11 +447,11 @@ impl Default for BezierPathConfig {
     fn default() -> Self {
         BezierPathConfig {
             center: Coords::init(0., 0.),
-            n_anchors: 9,
-            mean_anchor_radius: 60. * 2.,
-            stdev_anchor_radius: 20. * 2.,
-            stdev_subanchor_angle_dev: 10.,
-            points_per_bezier_curve: 15,
+            n_anchors: N_ANCHORS,
+            mean_anchor_radius: MEAN_ANCHOR_RADIUS,
+            stdev_anchor_radius: STDEV_ANCHOR_RADIUS,
+            stdev_subanchor_angle_dev: STDEV_SUBANCHOR_ANGLE_DEV,
+            points_per_bezier_curve: POINTS_PER_BEZIER_CURVE,
         }
     }
 }
@@ -453,7 +473,7 @@ impl BezierPathConfig {
                 Normal::new(0., (360. / config.n_anchors as f32) * 0.15).unwrap();
 
             (0..config.n_anchors)
-                .map(|n: i32| {
+                .map(|n: usize| {
                     let angle_dev: f32 = angle_dev_dist.sample(rng);
                     n as f32 * (360. / config.n_anchors as f32) + angle_dev - 90.
                     // -90 to start the first anchor at the bottom of the screen
@@ -464,9 +484,7 @@ impl BezierPathConfig {
                 .map(|angle: f32| {
                     let radius: f32 = radius_normal_dist
                         .sample(rng)
-                        .max(config.mean_anchor_radius - 2. * config.stdev_anchor_radius)
-                        .max(0.);
-
+                        .max(config.mean_anchor_radius / 4.);
                     Coords::init(
                         config.center.x.0 + radius * angle.to_radians().cos(),
                         config.center.y.0 + radius * angle.to_radians().sin(),
@@ -811,6 +829,7 @@ fn text_render_info<'a>(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum TextRenderInfoError {
     FontRenderError(ttf::FontError),
     CreateTextureError(render::TextureValueError),
@@ -836,10 +855,17 @@ const JOYSTICK_INNER_RADIUS: f32 = 50.;
 const JOYSTICK_OUTER_RADIUS: f32 = 100.;
 const JOYSTICK_MAX_REACH_RADIUS: f32 = JOYSTICK_OUTER_RADIUS - 0.8 * JOYSTICK_INNER_RADIUS;
 
+const LN_100: f32 = 4.60517;
 const TIME_TO_99_PERC_SPEED: f32 = 5.; // in s
 const THEORETICAL_MAX_SPEED: f32 = 100.; // in m/s
-const FRICTION_FACTOR: f32 = 4.6 / TIME_TO_99_PERC_SPEED;
+const FRICTION_FACTOR: f32 = LN_100 / TIME_TO_99_PERC_SPEED;
 const ENGINE_ACCELERATION: f32 = THEORETICAL_MAX_SPEED * FRICTION_FACTOR;
+
+const N_ANCHORS: usize = 12;
+const MEAN_ANCHOR_RADIUS: f32 = 120.;
+const STDEV_ANCHOR_RADIUS: f32 = 50.;
+const STDEV_SUBANCHOR_ANGLE_DEV: f32 = (360. / N_ANCHORS as f32) / 3.0;
+const POINTS_PER_BEZIER_CURVE: usize = 15;
 const PATH_WIDTH: f32 = 12.0;
 
 const GAME_FPS: f32 = 60.0;
@@ -864,16 +890,28 @@ pub fn main() {
     // Setup a game tick counter
     let mut game_tick_counter: u32 = 0;
 
+    // Toggle debug modes
+    let circuit_debug: bool = false;
+    let mouvement_debug: bool = true;
+
     // Generate the circuit
     let seed: u64 = rand::random_range(0..u64::MAX);
     println!("Seed: {}", seed);
-    let circuit_debug: bool = false;
-    let mouvement_debug: bool = true;
     let path_config: BezierPathConfig = BezierPathConfig::default();
     let path: BezierPath = path_config.generate_path(Some(seed));
     let (outer_border, inner_border) = path.generate_path_borders(PATH_WIDTH);
     let starting_point: Coords = path.starting_point;
     let starting_direction: Vector = path.starting_direction;
+    let inner_border_loop = inner_border
+        .iter()
+        .chain(iter::once(inner_border.first().unwrap()));
+    let outer_border_loop = outer_border
+        .iter()
+        .chain(iter::once(outer_border.first().unwrap()));
+    let circuit_polygon: Vec<Coords> = inner_border_loop
+        .chain(outer_border_loop.rev())
+        .copied()
+        .collect();
 
     // Initialize a car
     let mut car: Car = Car::init(starting_point, starting_direction);
@@ -883,8 +921,8 @@ pub fn main() {
         width: CAMERA_WIDTH,
         height: CAMERA_HEIGHT,
         coords: car.coords,
-        px_per_meter: (CAMERA_WIDTH as f32 / (car.length.0 / 0.05)).round() as u32,
-        // car length is 5% of the camera width
+        px_per_meter: (CAMERA_WIDTH as f32 / (car.length.0 / 0.04)).round() as u32,
+        // car length is 4% of the camera width
     };
 
     let fix_camera: Camera = Camera {
@@ -1036,6 +1074,20 @@ pub fn main() {
             car.set_engine_acc(Vector::init(0.0, 0.0));
         }
 
+        // Check if any of the 4 corners of the car rect is outside the circuit polygon
+        let car_corners: [Coords; 4] = car.corners_coords();
+        let mut is_car_inside: bool = true;
+        for corner in &car_corners {
+            if !inside_polygon(*corner, circuit_polygon.as_slice()) {
+                is_car_inside = false;
+            }
+        }
+        if is_car_inside {
+            car.set_friction_factor(FRICTION_FACTOR);
+        } else {
+            car.set_friction_factor(5. * FRICTION_FACTOR);
+        }
+
         // Update the car's coordinates based on its current acceleration and velocity
         car.update_coords(DT);
         // println!("Theoretical max speed: {}km/h", THEORETICAL_MAX_SPEED * 3.6);
@@ -1068,23 +1120,8 @@ pub fn main() {
         failed_rendering |= fill_polygon(&inner_border, current_camera, &mut canvas).is_err();
 
         canvas.set_draw_color(Color::RGB(80, 80, 80));
-        let inner_border_loop = inner_border
-            .iter()
-            .chain(iter::once(inner_border.first().unwrap()));
-        let outer_border_loop = outer_border
-            .iter()
-            .chain(iter::once(outer_border.first().unwrap()));
-
-        failed_rendering |= fill_polygon(
-            inner_border_loop
-                .chain(outer_border_loop.rev())
-                .copied()
-                .collect::<Vec<_>>()
-                .as_slice(),
-            current_camera,
-            &mut canvas,
-        )
-        .is_err();
+        failed_rendering |=
+            fill_polygon(circuit_polygon.as_slice(), current_camera, &mut canvas).is_err();
 
         if circuit_debug {
             failed_rendering |= path.render(current_camera, &mut canvas).is_err();

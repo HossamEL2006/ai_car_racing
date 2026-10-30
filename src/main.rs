@@ -5,6 +5,7 @@ use sdl3::{
     event::Event,
     joystick::Joystick,
     keyboard::{KeyboardState, Keycode, Scancode},
+    mouse::MouseButton,
     pixels::Color,
     rect,
     render::{self, Canvas},
@@ -163,8 +164,8 @@ impl Vector {
         if let Some(label) = label {
             let tip_point: rect::Point = (base_point + *self).as_point(camera);
             let mut label_render_info = text_render_info(label.0, label.1);
-            label_render_info.rect.x = tip_point.x - label_render_info.width() as i32 / 2;
-            label_render_info.rect.y = tip_point.y - label_render_info.height() as i32 / 2;
+            label_render_info.rect.x = tip_point.x - label_render_info.width() / 2;
+            label_render_info.rect.y = tip_point.y - label_render_info.height() / 2;
             render_text(canvas, &label_render_info)?;
         }
         Ok(())
@@ -242,31 +243,32 @@ impl Car {
         canvas: &mut Canvas<Window>,
         text_renderer_config: &TextRendererConfig,
     ) -> Result<(), sdl3::Error> {
+        let debug_scalar: f32 = 0.3;
         let base_point: Coords = self.coords;
         let friction_acc = -self.friction_factor * self.velocity;
         canvas.set_draw_color(Color::RGB(255, 0, 0));
-        (0.3 * self.velocity).render(
+        (debug_scalar * self.velocity).render(
             base_point,
             camera,
             canvas,
             Some(("v", text_renderer_config)),
         )?;
         canvas.set_draw_color(Color::RGB(0, 0, 255));
-        (0.3 * self.engine_acc).render(
+        (debug_scalar.powi(2) * self.engine_acc).render(
             base_point,
             camera,
             canvas,
             Some(("p", text_renderer_config)),
         )?;
         canvas.set_draw_color(Color::RGB(0, 255, 0));
-        (0.3 * friction_acc).render(
+        (debug_scalar.powi(2) * friction_acc).render(
             base_point,
             camera,
             canvas,
             Some(("f", text_renderer_config)),
         )?;
         canvas.set_draw_color(Color::RGB(255, 255, 0));
-        (0.3 * (self.engine_acc + friction_acc)).render(
+        (debug_scalar.powi(2) * (self.engine_acc + friction_acc)).render(
             base_point,
             camera,
             canvas,
@@ -622,20 +624,16 @@ fn render_joystick(
         canvas,
         x as i16,
         y as i16,
-        OUTER_JOYSTICK_RADIUS as i16,
+        JOYSTICK_OUTER_RADIUS as i16,
         Color::RGB(200, 200, 200),
     )?;
-    let dir_x: i16 = (x as f32
-        + direction.x.0 * (OUTER_JOYSTICK_RADIUS as f32 - 0.8 * INNER_JOYSTICK_RADIUS as f32))
-        as i16;
-    let dir_y: i16 = (y as f32
-        - direction.y.0 * (OUTER_JOYSTICK_RADIUS as f32 - 0.8 * INNER_JOYSTICK_RADIUS as f32))
-        as i16;
+    let dir_x: i16 = (x as f32 + direction.x.0 * JOYSTICK_MAX_REACH_RADIUS) as i16;
+    let dir_y: i16 = (y as f32 - direction.y.0 * JOYSTICK_MAX_REACH_RADIUS) as i16;
     draw_disc(
         canvas,
         dir_x,
         dir_y,
-        INNER_JOYSTICK_RADIUS as i16,
+        JOYSTICK_INNER_RADIUS as i16,
         if pressed {
             Color::RGB(125, 125, 125)
         } else {
@@ -705,11 +703,13 @@ const SCREEN_WIDTH: u32 = CAMERA_WIDTH + SIDE_PANEL_WIDTH;
 const SCREEN_HEIGHT: u32 = CAMERA_HEIGHT;
 
 const JOYSTICK_POSITION: (u32, u32) = (CAMERA_WIDTH + SIDE_PANEL_WIDTH / 2, CAMERA_HEIGHT / 3);
-const INNER_JOYSTICK_RADIUS: u32 = 50;
-const OUTER_JOYSTICK_RADIUS: u32 = 100;
+const JOYSTICK_INNER_RADIUS: u32 = 50;
+const JOYSTICK_OUTER_RADIUS: u32 = 100;
+const JOYSTICK_MAX_REACH_RADIUS: f32 =
+    JOYSTICK_OUTER_RADIUS as f32 - 0.8 * JOYSTICK_INNER_RADIUS as f32;
 
-const FRICTION_FACTOR: f32 = 0.7;
-const ENGINE_ACCELERATION: f32 = 60.0;
+const FRICTION_FACTOR: f32 = 1.5;
+const ENGINE_ACCELERATION: f32 = 150.;
 const THEORETICAL_MAX_SPEED: f32 = ENGINE_ACCELERATION / FRICTION_FACTOR;
 
 const GAME_FPS: f32 = 60.0;
@@ -749,6 +749,14 @@ pub fn main() {
     let mut car: Car = Car::init(starting_point, starting_direction);
 
     // Initialize the cameras
+    let mut car_camera: Camera = Camera {
+        width: CAMERA_WIDTH,
+        height: CAMERA_HEIGHT,
+        coords: car.coords,
+        px_per_meter: (CAMERA_WIDTH as f32 / (car.length.0 / 0.05)).round() as u32,
+        // car length is 5% of the camera width
+    };
+
     let fix_camera: Camera = Camera {
         width: CAMERA_WIDTH,
         height: CAMERA_HEIGHT,
@@ -756,16 +764,7 @@ pub fn main() {
         px_per_meter: 5,
     };
 
-    let mut car_camera: Camera = Camera {
-        width: CAMERA_WIDTH,
-        height: CAMERA_HEIGHT,
-        coords: car.coords,
-        px_per_meter: (CAMERA_WIDTH as f32 / (car.length.0 / 0.05)).round() as u32,
-        // car length is 5% of the screen width
-    };
-
-    // Initialize the joystick direction
-    let mut joystick_direction: Vector = Vector::init(0., 0.);
+    let mut current_camera: usize = 0; // 0 for car_camera, 1 for fix_camera
 
     // Initalize connection with a controller joystick
     let mut joystick: Option<Joystick> = None;
@@ -784,6 +783,9 @@ pub fn main() {
         }
     }
 
+    // Implement mouse and keyboard controls for the car
+    let mut joystick_pressed: bool = false;
+
     // Initialize the TTF context for rendering text
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
     let text_renderer_config: TextRendererConfig = TextRendererConfig {
@@ -795,7 +797,7 @@ pub fn main() {
 
     // Instantiate text render info for displaying instructions and information
     let mut hold_space_render_info: TextRenderInfo<'_> =
-        text_render_info("HOLD SPACE TO ZOOM OUT", &text_renderer_config);
+        text_render_info("PRESS ENTER TO TOGGLE CAMERAS", &text_renderer_config);
     // TODO : Implement position specification for `text_render_info` to avoid having to
     //        call `set_pos` separately
     hold_space_render_info.set_pos(
@@ -828,6 +830,31 @@ pub fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(Keycode::Return),
+                    ..
+                } => {
+                    current_camera = 1 - current_camera;
+                }
+                Event::MouseButtonDown {
+                    mouse_btn: MouseButton::Left,
+                    x,
+                    y,
+                    ..
+                } => {
+                    let dist_to_joystick: f32 = ((x - JOYSTICK_POSITION.0 as f32).powi(2)
+                        + (y - JOYSTICK_POSITION.1 as f32).powi(2))
+                    .sqrt();
+                    if dist_to_joystick < JOYSTICK_INNER_RADIUS as f32 {
+                        joystick_pressed = true;
+                    }
+                }
+                Event::MouseButtonUp {
+                    mouse_btn: MouseButton::Left,
+                    ..
+                } => {
+                    joystick_pressed = false;
+                }
                 _ => (),
             }
         }
@@ -835,19 +862,31 @@ pub fn main() {
         let keyboard_state: KeyboardState<'_> = event_pump.keyboard_state();
         let space_pressed: bool = keyboard_state.is_scancode_pressed(Scancode::Space);
 
+        let mut acceleration_pressed: bool = false;
+        let mut joystick_direction = Vector::init(0.0, 0.0);
+
+        // Read joystick input
         if let Some(js) = &joystick {
             let axis_0: f32 = js.axis(0).unwrap_or(0) as f32 / 32768.0;
             let axis_1: f32 = js.axis(1).unwrap_or(0) as f32 / 32768.0;
             joystick_direction = Vector::init(axis_0, -axis_1);
+            acceleration_pressed = js.button(0).unwrap_or(false);
         }
 
-        let acceleration_pressed: bool = if let Some(js) = &joystick {
-            js.button(0).unwrap_or(false)
-        } else {
-            false
-        };
+        // Read mouse and keyboard output
+        acceleration_pressed |= space_pressed;
+        if joystick_pressed {
+            let mouse_x: f32 = event_pump.mouse_state().x();
+            let mouse_y: f32 = event_pump.mouse_state().y();
+            let dx: f32 = mouse_x - JOYSTICK_POSITION.0 as f32;
+            let dy: f32 = mouse_y - JOYSTICK_POSITION.1 as f32;
+            joystick_direction = (1. / JOYSTICK_MAX_REACH_RADIUS) * Vector::init(dx, -dy);
+            if joystick_direction.norm().0 > 1.0 {
+                joystick_direction = joystick_direction.normalized();
+            }
+        }
 
-        // Apply joystick input to the car's acceleration
+        // Apply player input to the car's acceleration
         if acceleration_pressed {
             let engine_acc_vec = if joystick_direction.norm().0 < 0.2 {
                 Vector::init(0.0, 0.0)
@@ -865,14 +904,15 @@ pub fn main() {
         // Update cameras
         car_camera.coords = car.coords;
 
+        // Determine which camera to use for rendering
+        let current_camera: &Camera = if current_camera == 0 {
+            &car_camera
+        } else {
+            &fix_camera
+        };
+
         // Start rendering
         let mut failed_rendering: bool = false;
-
-        // Determine which camera to use for rendering
-        let mut current_camera: &Camera = &car_camera;
-        if space_pressed {
-            current_camera = &fix_camera;
-        }
 
         // Fill the entire screen with RGB(50, 50, 50)
         canvas.set_draw_color(Color::RGB(50, 50, 50));
@@ -901,10 +941,8 @@ pub fn main() {
                 .is_err();
         }
 
-        // Write "HOLD SPACE TO ZOOM OUT"
-        if !space_pressed {
-            failed_rendering |= render_text(&mut canvas, &hold_space_render_info).is_err();
-        }
+        // Write "PRESS ENTER TO TOGGLE CAMERAS"
+        failed_rendering |= render_text(&mut canvas, &hold_space_render_info).is_err();
 
         // Render the joystick name if available
         failed_rendering |= render_text(&mut canvas, &js_name_render_info).is_err();

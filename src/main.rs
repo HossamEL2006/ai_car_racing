@@ -138,6 +138,37 @@ impl Vector {
             y: Meter(x * sin_theta + y * cos_theta),
         }
     }
+
+    fn render(
+        &self,
+        base_point: Coords,
+        camera: &Camera,
+        canvas: &mut Canvas<Window>,
+        label: Option<(&str, &TextRendererConfig)>,
+    ) -> Result<(), sdl3::Error> {
+        if self.norm().0 < 0.5 {
+            return Ok(());
+        }
+
+        let start: rect::Point = (base_point).as_point(camera);
+        let end: rect::Point = (base_point + *self).as_point(camera);
+        canvas.draw_line(start, end)?;
+        // add a triangular arrow tip
+        let arrow_tip: rect::Point =
+            (base_point + *self + 0.2 * self.rotated(150.0f32.to_radians())).as_point(camera);
+        canvas.draw_line(end, arrow_tip)?;
+        let arrow_tip2: rect::Point =
+            (base_point + *self + 0.2 * self.rotated(210.0f32.to_radians())).as_point(camera);
+        canvas.draw_line(end, arrow_tip2)?;
+        if let Some(label) = label {
+            let tip_point: rect::Point = (base_point + *self).as_point(camera);
+            let mut label_render_info = text_render_info(label.0, label.1);
+            label_render_info.rect.x = tip_point.x - label_render_info.width() as i32 / 2;
+            label_render_info.rect.y = tip_point.y - label_render_info.height() as i32 / 2;
+            render_text(canvas, &label_render_info)?;
+        }
+        Ok(())
+    }
 }
 
 impl ops::Add for Vector {
@@ -173,8 +204,9 @@ struct Car {
     direction_vec: Vector,
     length: Meter,
     width: Meter,
-    acceleration: Vector,
+    engine_acc: Vector,
     velocity: Vector,
+    friction_factor: f32,
 }
 
 impl Car {
@@ -184,8 +216,9 @@ impl Car {
             direction_vec: direction.normalized(),
             length: Meter(4.5),
             width: Meter(2.),
-            acceleration: Vector::init(0., 0.),
+            engine_acc: Vector::init(0., 0.),
             velocity: Vector::init(0., 0.),
+            friction_factor: FRICTION_FACTOR,
         }
     }
 
@@ -203,12 +236,52 @@ impl Car {
         canvas.draw_lines(corners.as_slice())
     }
 
-    fn set_acceleration(&mut self, acc: Vector) {
-        self.acceleration = acc
+    fn render_debug_vectors(
+        &self,
+        camera: &Camera,
+        canvas: &mut Canvas<Window>,
+        text_renderer_config: &TextRendererConfig,
+    ) -> Result<(), sdl3::Error> {
+        let base_point: Coords = self.coords;
+        let friction_acc = -self.friction_factor * self.velocity;
+        canvas.set_draw_color(Color::RGB(255, 0, 0));
+        (0.3 * self.velocity).render(
+            base_point,
+            camera,
+            canvas,
+            Some(("v", text_renderer_config)),
+        )?;
+        canvas.set_draw_color(Color::RGB(0, 0, 255));
+        (0.3 * self.engine_acc).render(
+            base_point,
+            camera,
+            canvas,
+            Some(("p", text_renderer_config)),
+        )?;
+        canvas.set_draw_color(Color::RGB(0, 255, 0));
+        (0.3 * friction_acc).render(
+            base_point,
+            camera,
+            canvas,
+            Some(("f", text_renderer_config)),
+        )?;
+        canvas.set_draw_color(Color::RGB(255, 255, 0));
+        (0.3 * (self.engine_acc + friction_acc)).render(
+            base_point,
+            camera,
+            canvas,
+            Some(("a", text_renderer_config)),
+        )?;
+        Ok(())
+    }
+
+    fn set_engine_acc(&mut self, acc: Vector) {
+        self.engine_acc = acc
     }
 
     fn update_coords(&mut self, dt: f32) {
-        self.velocity = self.velocity + dt * self.acceleration;
+        let friction_acc = -self.friction_factor * self.velocity;
+        self.velocity = self.velocity + dt * self.engine_acc + dt * friction_acc;
         let velocity_norm: f32 = self.velocity.norm().0;
         if velocity_norm != 0. {
             self.direction_vec = (1. / velocity_norm) * self.velocity;
@@ -541,6 +614,7 @@ fn draw_disc(
 fn render_joystick(
     position: (u32, u32),
     direction: Vector,
+    pressed: bool,
     canvas: &mut Canvas<Window>,
 ) -> Result<(), sdl3::Error> {
     let (x, y) = position;
@@ -551,21 +625,29 @@ fn render_joystick(
         OUTER_JOYSTICK_RADIUS as i16,
         Color::RGB(200, 200, 200),
     )?;
-    // make the inner joystick barely able to move out of the outer circle, just to give the general feeling of pushing a joystick to max
     let dir_x: i16 = (x as f32
         + direction.x.0 * (OUTER_JOYSTICK_RADIUS as f32 - 0.8 * INNER_JOYSTICK_RADIUS as f32))
         as i16;
     let dir_y: i16 = (y as f32
-        + direction.y.0 * (OUTER_JOYSTICK_RADIUS as f32 - 0.8 * INNER_JOYSTICK_RADIUS as f32))
+        - direction.y.0 * (OUTER_JOYSTICK_RADIUS as f32 - 0.8 * INNER_JOYSTICK_RADIUS as f32))
         as i16;
     draw_disc(
         canvas,
         dir_x,
         dir_y,
         INNER_JOYSTICK_RADIUS as i16,
-        Color::RGB(175, 175, 175),
+        if pressed {
+            Color::RGB(125, 125, 125)
+        } else {
+            Color::RGB(175, 175, 175)
+        },
     )?;
     Ok(())
+}
+
+struct TextRendererConfig<'a> {
+    font: ttf::Font<'a>,
+    texture_creator: render::TextureCreator<WindowContext>,
 }
 
 struct TextRenderInfo<'a> {
@@ -590,15 +672,16 @@ impl TextRenderInfo<'_> {
 
 fn text_render_info<'a>(
     text: &str,
-    font: &ttf::Font,
-    texture_creator: &'a render::TextureCreator<WindowContext>,
+    text_renderer_config: &'a TextRendererConfig,
 ) -> TextRenderInfo<'a> {
-    let surface = font
+    let surface = text_renderer_config
+        .font
         .render(text)
         .blended(Color::RGB(255, 255, 255))
         .map_err(|e: ttf::FontError| e.to_string())
         .unwrap();
-    let texture = texture_creator
+    let texture = text_renderer_config
+        .texture_creator
         .create_texture_from_surface(&surface)
         .map_err(|e| e.to_string())
         .unwrap();
@@ -625,6 +708,10 @@ const JOYSTICK_POSITION: (u32, u32) = (CAMERA_WIDTH + SIDE_PANEL_WIDTH / 2, CAME
 const INNER_JOYSTICK_RADIUS: u32 = 50;
 const OUTER_JOYSTICK_RADIUS: u32 = 100;
 
+const FRICTION_FACTOR: f32 = 0.7;
+const ENGINE_ACCELERATION: f32 = 60.0;
+const THEORETICAL_MAX_SPEED: f32 = ENGINE_ACCELERATION / FRICTION_FACTOR;
+
 const GAME_FPS: f32 = 60.0;
 const DT: f32 = GAME_FPS.recip();
 
@@ -650,7 +737,8 @@ pub fn main() {
     // Generate the circuit
     let seed: u64 = rand::random_range(0..u64::MAX);
     println!("Seed: {}", seed);
-    let debug: bool = false;
+    let circuit_debug: bool = false;
+    let mouvement_debug: bool = true;
     let path_config: BezierPathConfig = BezierPathConfig::default();
     let path: BezierPath = path_config.generate_path(Some(seed));
     let (outer_border, inner_border) = path.generate_path_borders(10.0);
@@ -698,29 +786,35 @@ pub fn main() {
 
     // Initialize the TTF context for rendering text
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
-    let font: ttf::Font = ttf_context
-        .load_font("assets/Basic-Regular.ttf", 25.)
-        .unwrap();
-    let texture_creator: render::TextureCreator<WindowContext> = canvas.texture_creator();
+    let text_renderer_config: TextRendererConfig = TextRendererConfig {
+        font: ttf_context
+            .load_font("assets/Basic-Regular.ttf", 25.)
+            .unwrap(),
+        texture_creator: canvas.texture_creator(),
+    };
 
     // Instantiate text render info for displaying instructions and information
     let mut hold_space_render_info: TextRenderInfo<'_> =
-        text_render_info("HOLD SPACE TO FOLLOW CAR", &font, &texture_creator);
+        text_render_info("HOLD SPACE TO ZOOM OUT", &text_renderer_config);
     // TODO : Implement position specification for `text_render_info` to avoid having to
     //        call `set_pos` separately
-    hold_space_render_info.set_pos(10, 10);
+    hold_space_render_info.set_pos(
+        10,
+        SCREEN_HEIGHT as i32 - hold_space_render_info.height() - 10,
+    );
 
     let mut js_name_render_info: TextRenderInfo<'_> =
-        text_render_info("No controller detected at startup", &font, &texture_creator);
+        text_render_info("No controller detected at startup", &text_renderer_config);
     if let Some(js) = &joystick {
         println!("Joystick connected: {:?}", js.name());
-        js_name_render_info = text_render_info(
-            &format!("Controller: {}", js.name()),
-            &font,
-            &texture_creator,
-        );
+        js_name_render_info =
+            text_render_info(&format!("Controller: {}", js.name()), &text_renderer_config);
     }
     js_name_render_info.set_pos(SCREEN_WIDTH as i32 - js_name_render_info.width() - 10, 10);
+
+    let mut seed_render_info: TextRenderInfo<'_> =
+        text_render_info(&format!("SEED: {}", seed), &text_renderer_config);
+    seed_render_info.set_pos(10, 10);
 
     // Initialize the event pump for handling SDL events
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
@@ -744,25 +838,29 @@ pub fn main() {
         if let Some(js) = &joystick {
             let axis_0: f32 = js.axis(0).unwrap_or(0) as f32 / 32768.0;
             let axis_1: f32 = js.axis(1).unwrap_or(0) as f32 / 32768.0;
-            joystick_direction = Vector::init(axis_0, axis_1);
+            joystick_direction = Vector::init(axis_0, -axis_1);
         }
 
-        // Update the car's position and rotation
-        let slowed_counter: usize = (game_tick_counter / 5) as usize;
-        car.coords = path.coords[slowed_counter % path.coords.len()];
-        let direction: Vector = {
-            let prev_index: usize =
-                (slowed_counter as i32 - 1).rem_euclid(path.coords.len() as i32) as usize;
-            let next_index: usize = (slowed_counter + 1) % path.coords.len();
-            let prev_point: Coords = path.coords[prev_index];
-            let next_point: Coords = path.coords[next_index];
-            Vector::init(
-                next_point.x.0 - prev_point.x.0,
-                next_point.y.0 - prev_point.y.0,
-            )
+        let acceleration_pressed: bool = if let Some(js) = &joystick {
+            js.button(0).unwrap_or(false)
+        } else {
+            false
+        };
+
+        // Apply joystick input to the car's acceleration
+        if acceleration_pressed {
+            let engine_acc_vec = if joystick_direction.norm().0 < 0.2 {
+                Vector::init(0.0, 0.0)
+            } else {
+                joystick_direction.normalized()
+            };
+            car.set_engine_acc(ENGINE_ACCELERATION * engine_acc_vec);
+        } else {
+            car.set_engine_acc(Vector::init(0.0, 0.0));
         }
-        .normalized();
-        car.direction_vec = direction;
+
+        // Update the car's coordinates based on its current acceleration and velocity
+        car.update_coords(DT);
 
         // Update cameras
         car_camera.coords = car.coords;
@@ -771,9 +869,9 @@ pub fn main() {
         let mut failed_rendering: bool = false;
 
         // Determine which camera to use for rendering
-        let mut current_camera: &Camera = &fix_camera;
+        let mut current_camera: &Camera = &car_camera;
         if space_pressed {
-            current_camera = &car_camera;
+            current_camera = &fix_camera;
         }
 
         // Fill the entire screen with RGB(50, 50, 50)
@@ -782,32 +880,37 @@ pub fn main() {
 
         // Draw the circuit
         canvas.set_draw_color(Color::RGB(200, 200, 200));
-        if debug {
-            failed_rendering |= path.render(current_camera, &mut canvas).is_err();
-        }
+        failed_rendering |= render_coord_loop(&inner_border, current_camera, &mut canvas).is_err();
+        failed_rendering |= render_coord_loop(&outer_border, current_camera, &mut canvas).is_err();
 
-        // Draw the anchors for debugging
-        if debug {
+        if circuit_debug {
+            failed_rendering |= path.render(current_camera, &mut canvas).is_err();
             failed_rendering |= path
                 .render_debug_anchors(current_camera, &mut canvas)
                 .is_err();
         }
 
-        // Draw the path borders for debugging
-        failed_rendering |= render_coord_loop(&inner_border, current_camera, &mut canvas).is_err();
-        failed_rendering |= render_coord_loop(&outer_border, current_camera, &mut canvas).is_err();
-
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));
         failed_rendering |= car.render(current_camera, &mut canvas).is_err();
 
-        // Write "HOLD SPACE TO FOLLOW CAR"
+        // Debug car vectors
+        if mouvement_debug {
+            failed_rendering |= car
+                .render_debug_vectors(current_camera, &mut canvas, &text_renderer_config)
+                .is_err();
+        }
+
+        // Write "HOLD SPACE TO ZOOM OUT"
         if !space_pressed {
             failed_rendering |= render_text(&mut canvas, &hold_space_render_info).is_err();
         }
 
         // Render the joystick name if available
         failed_rendering |= render_text(&mut canvas, &js_name_render_info).is_err();
+
+        // Render seed text
+        failed_rendering |= render_text(&mut canvas, &seed_render_info).is_err();
 
         // Draw a seperating line between the game area and the side panel
         canvas.set_draw_color(Color::RGB(100, 100, 100));
@@ -818,8 +921,13 @@ pub fn main() {
             .is_err();
 
         // Render the joystick
-        failed_rendering |=
-            render_joystick(JOYSTICK_POSITION, joystick_direction, &mut canvas).is_err();
+        failed_rendering |= render_joystick(
+            JOYSTICK_POSITION,
+            joystick_direction,
+            acceleration_pressed,
+            &mut canvas,
+        )
+        .is_err();
 
         // Apply the changes on the screen
         canvas.present();

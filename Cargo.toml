@@ -7,3 +7,4 @@ edition = "2024"
 sdl3 = { version = "0.20.0", features = ["build-from-source", "ttf"] }
 rand = "0.10.3"
 rand_distr = "0.6.0"
+svg = "0.18.0"

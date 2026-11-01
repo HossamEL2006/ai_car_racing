@@ -401,7 +401,7 @@ impl Car {
     }
 
     fn load_svg(&self) -> Vec<Polygon> {
-        let svg_path: &str = "assets/f1_car_low.svg";
+        let svg_path: &str = "assets/f1_car.svg";
         println!("Loading F1 car SVG from {}", svg_path);
 
         let mut polygons: Vec<Polygon> = Vec::new();
@@ -991,14 +991,35 @@ const PATH_WIDTH: f32 = 12.0;
 const CIRCUIT_DEBUG: bool = false;
 const MOUVEMENT_DEBUG: bool = true;
 const DEBUG_MAX_FPS: bool = false;
-const PRINT_FPS: bool = true;
+const REGULAR_LOG_FPS: bool = true;
+const REGULAR_LOG_PERF: bool = true;
+const REGULARITY_INTERVAL: u32 = 60;
+const LOG_PERF_ON_LAG: bool = true;
+
+const VSYNC: bool = true && !DEBUG_MAX_FPS;
+
+const DEBUG_PERFORMANCE_LABELS: [&str; 13] = [
+    "           Input Handeling",
+    "            Car Collisions",
+    "               Car Physics",
+    "          Camera Selection",
+    "           Screen Clearing",
+    "   Enclosed Area Rendering",
+    "    Circuit Path Rendering",
+    "[DEBUG] Circuit Generation",
+    "             Car Rendering",
+    "      [DEBUG] Car Movement",
+    "            Text Rendering",
+    "      Side Panel Rendering",
+    "             Screen Update",
+];
 
 const GAME_FPS: f32 = 60.0;
 const DT: f32 = GAME_FPS.recip();
 
 pub fn main() {
     // Initialize SDL
-    if !DEBUG_MAX_FPS {
+    if VSYNC {
         sdl3::hint::set("SDL_RENDER_VSYNC", "1");
     }
     let sdl_context: sdl3::Sdl = sdl3::init().unwrap();
@@ -1112,17 +1133,31 @@ pub fn main() {
         text_render_info(&format!("SEED: {}", seed), &text_renderer_config).unwrap();
     seed_render_info.set_pos(10, 10);
 
-    // Initialize an FPS sample queue to monitor average FPS across 100 frames
-    let mut fps_sample: VecDeque<f32> = VecDeque::with_capacity(100);
-    for _ in 0..100 {
+    // Initialize an FPS sample queue to monitor average FPS across 3 seconds
+    let mut fps_sample: VecDeque<f32> = VecDeque::with_capacity(3 * GAME_FPS as usize);
+    for _ in 0..(3 * GAME_FPS as usize) {
         fps_sample.push_back(GAME_FPS);
     }
+
+    // Performance debugging
+
+    // Add left paddings to debug performance labels for better alignment
+    // let max_label_length = debug_performance_labels
+    //     .iter()
+    //     .map(|label| label.len())
+    //     .max()
+    //     .unwrap_or(0);
+    // for label in &mut debug_performance_labels {
+    //     let padding = max_label_length - label.len();
+    //     *label = format!("{}{}", " ".repeat(padding), label);
+    // }
 
     // Initialize the event pump for handling SDL events
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
 
     'running: loop {
         let time: time::Instant = time::Instant::now();
+        let mut timestamps: Vec<u128> = Vec::new();
 
         // Read the events
         for event in event_pump.poll_iter() {
@@ -1200,6 +1235,10 @@ pub fn main() {
             car.set_engine_acc(Vector::init(0.0, 0.0));
         }
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         // Check if any of the 4 corners of the car rect is outside the circuit polygon
         let mut friction_multiplier: f32 = 2.0;
         let car_corners: [Coords; 4] = car.corner_coords();
@@ -1216,10 +1255,18 @@ pub fn main() {
             car.set_friction_factor(friction_multiplier * FRICTION_FACTOR);
         }
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         // Update the car's coordinates based on its current acceleration and velocity
         car.update_coords(DT);
         // println!("Theoretical max speed: {}km/h", THEORETICAL_MAX_SPEED * 3.6);
         // println!("Car acceleration: {}km/h", car.velocity.norm().0 * 3.6);
+
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
 
         // Update cameras
         car_camera.coords = car.coords;
@@ -1231,12 +1278,20 @@ pub fn main() {
             &fix_camera
         };
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         // Start rendering
         let mut failed_rendering: bool = false;
 
         // Fill the entire screen with dark green
         canvas.set_draw_color(Color::RGB(25, 50, 25));
         canvas.clear();
+
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
 
         // Draw the circuit
         // canvas.set_draw_color(Color::RGB(200, 200, 200));
@@ -1249,10 +1304,18 @@ pub fn main() {
             .render_filled(current_camera, &mut canvas)
             .is_err();
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         canvas.set_draw_color(Color::RGB(80, 80, 80));
         failed_rendering |= circuit_polygon
             .render_filled(current_camera, &mut canvas)
             .is_err();
+
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
 
         if CIRCUIT_DEBUG {
             failed_rendering |= path.render(current_camera, &mut canvas).is_err();
@@ -1261,15 +1324,27 @@ pub fn main() {
                 .is_err();
         }
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));
         failed_rendering |= car.pretty_render(current_camera, &mut canvas).is_err();
+
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
 
         // Debug car vectors
         if MOUVEMENT_DEBUG {
             failed_rendering |= car
                 .render_debug_vectors(current_camera, &mut canvas, &text_renderer_config)
                 .is_err();
+        }
+
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
         }
 
         // Write "PRESS ENTER TO TOGGLE CAMERAS"
@@ -1281,6 +1356,10 @@ pub fn main() {
         // Render seed text
         failed_rendering |= render_text(&mut canvas, &seed_render_info).is_err();
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         // Draw a seperating line between the game area and the side panel
         canvas.set_draw_color(Color::RGB(100, 100, 100));
         let (x1, y1) = (CAMERA_WIDTH, 0u32);
@@ -1290,6 +1369,7 @@ pub fn main() {
             .is_err();
 
         // Render the joystick
+        // TODO: Optimize rendering with a joystick texture
         failed_rendering |= render_joystick(
             JOYSTICK_POSITION,
             joystick_direction,
@@ -1298,32 +1378,80 @@ pub fn main() {
         )
         .is_err();
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         // Apply the changes on the screen
         canvas.present();
+
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
 
         // Detect failed rendering attempts
         if failed_rendering {
             eprintln!("Warning: Failed rendering one or more elements.");
         }
 
-        // Control the frame rate
-        let frame_duration = Duration::new(0, (1_000_000_000f32 / GAME_FPS).round() as u32);
-        if let Some(remaining_time) = frame_duration.checked_sub(time.elapsed())
-            && !DEBUG_MAX_FPS
-        {
-            std::thread::sleep(remaining_time);
-        }
-
+        // Compute the average FPS
         fps_sample.push_back(1.0 / time.elapsed().as_secs_f32());
         fps_sample.pop_front();
-
         let average_fps: f32 = fps_sample.iter().sum::<f32>() / fps_sample.len() as f32;
+        let mut log_fps: bool =
+            REGULAR_LOG_FPS && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
+        let mut log_perf: bool =
+            REGULAR_LOG_PERF && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
 
-        (PRINT_FPS && game_tick_counter.is_multiple_of(GAME_FPS as u32))
-            .then(|| println!("Average FPS: {}", average_fps));
+        // Sleep to control the FPS
+        let mut slept: bool = false;
+        if !DEBUG_MAX_FPS {
+            let frame_duration: Duration =
+                Duration::new(0, (1_000_000_000f32 / GAME_FPS).round() as u32);
+            if let Some(remaining_time) = frame_duration.checked_sub(time.elapsed()) {
+                std::thread::sleep(remaining_time);
+                slept = true;
+            }
+        }
+
         // If average frame rate drops below 80% of the frame target, log a warning
-        if average_fps < 0.8 * GAME_FPS && game_tick_counter.is_multiple_of(10) {
+        if average_fps < 0.8 * GAME_FPS {
             eprintln!("Warning: Frame rate dropped below 80% of the target.");
+            log_fps = true;
+            LOG_PERF_ON_LAG.then(|| log_perf = true);
+        }
+
+        if log_fps {
+            println!("Average FPS: {}", average_fps);
+        }
+
+        if log_perf {
+            if timestamps.len() != DEBUG_PERFORMANCE_LABELS.len() {
+                eprintln!("Warning: Mismatch between timestamps and debug performance labels.");
+            }
+
+            let frame_duration: u128 = *timestamps.last().unwrap();
+            println!(
+                "Frame duration (sleep excluded): {} µs -> {:.2}% of frame target",
+                frame_duration,
+                100.0 * frame_duration as f32 / (1_000_000.0 / GAME_FPS)
+            );
+            if slept {
+                println!("The game slept this frame.");
+            }
+
+            println!("Detailed performance breakdown:");
+
+            let mut last_timestamp: u128 = 0;
+            for (i, timestamp) in timestamps.iter().enumerate() {
+                println!(
+                    "{}: {} µs -> {:.1}% of frame target",
+                    DEBUG_PERFORMANCE_LABELS[i],
+                    timestamp - last_timestamp,
+                    100.0 * (timestamp - last_timestamp) as f32 / (1_000_000.0 / GAME_FPS)
+                );
+                last_timestamp = *timestamp;
+            }
         }
 
         game_tick_counter += 1;

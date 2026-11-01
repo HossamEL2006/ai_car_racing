@@ -6,14 +6,15 @@ use sdl3::{
     joystick::Joystick,
     keyboard::{KeyboardState, Keycode, Scancode},
     mouse::MouseButton,
-    pixels::Color,
+    pixels::{self, Color},
     rect,
     render::{self, Canvas},
+    surface::Surface,
     ttf,
     video::{Window, WindowContext},
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map},
     iter, ops,
     rc::Rc,
     time::{self, Duration},
@@ -151,27 +152,21 @@ impl Vector {
         base_point: Coords,
         camera: &Camera,
         canvas: &mut Canvas<Window>,
-    ) -> Result<(), RenderVectorError> {
+    ) -> Result<(), sdl3::Error> {
         if self.norm().0 < 0.5 {
             return Ok(());
         }
 
         let start: rect::Point = (base_point).as_point(camera);
         let end: rect::Point = (base_point + *self).as_point(camera);
-        canvas
-            .draw_line(start, end)
-            .map_err(RenderVectorError::SdlError)?;
+        canvas.draw_line(start, end)?;
 
         let arrow_tip: rect::Point =
             (base_point + *self + 0.2 * self.rotated(150.0f32.to_radians())).as_point(camera);
-        canvas
-            .draw_line(end, arrow_tip)
-            .map_err(RenderVectorError::SdlError)?;
+        canvas.draw_line(end, arrow_tip)?;
         let arrow_tip2: rect::Point =
             (base_point + *self + 0.2 * self.rotated(210.0f32.to_radians())).as_point(camera);
-        canvas
-            .draw_line(end, arrow_tip2)
-            .map_err(RenderVectorError::SdlError)?;
+        canvas.draw_line(end, arrow_tip2)?;
 
         Ok(())
     }
@@ -184,27 +179,31 @@ impl Vector {
         label: &str,
         font_renderer: &mut FontRenderer<'_, 'tc>,
         texture_creator: &'tc render::TextureCreator<T>,
-    ) -> Result<(), RenderVectorError> {
+    ) -> Result<(), VectorRenderLabeledError> {
         if self.norm().0 < 0.5 {
             return Ok(());
         }
 
-        self.render(base_point, camera, canvas)?;
+        self.render(base_point, camera, canvas)
+            .map_err(VectorRenderLabeledError::ArrowRender)?;
         let tip_point: rect::Point = (base_point + *self).as_point(camera);
-        let mut label_render_info = get_positioned_texture(label, font_renderer, texture_creator)
-            .map_err(RenderVectorError::TextTextureError)?;
-        label_render_info.rect.x = tip_point.x - label_render_info.width() / 2;
-        label_render_info.rect.y = tip_point.y - label_render_info.height() / 2;
-        render_text(canvas, &label_render_info).map_err(RenderVectorError::SdlError)?;
+        let mut label_posed_texture = get_positioned_texture(label, font_renderer, texture_creator)
+            .map_err(VectorRenderLabeledError::LabelTexture)?;
+        label_posed_texture.rect.x = tip_point.x - label_posed_texture.width() / 2;
+        label_posed_texture.rect.y = tip_point.y - label_posed_texture.height() / 2;
+        label_posed_texture
+            .render_onto(canvas)
+            .map_err(VectorRenderLabeledError::LabelRender)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
 #[derive(Debug)]
-enum RenderVectorError {
-    SdlError(sdl3::Error),
-    TextTextureError(TextTextureError),
+enum VectorRenderLabeledError {
+    ArrowRender(sdl3::Error),
+    LabelTexture(TextRenderError),
+    LabelRender(sdl3::Error),
 }
 
 impl ops::Add for Vector {
@@ -225,6 +224,19 @@ impl ops::Mul<Vector> for f32 {
         rhs.x.0 *= self;
         rhs.y.0 *= self;
         rhs
+    }
+}
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+struct Hashf32(u32);
+
+impl Hashf32 {
+    fn new(value: f32) -> Self {
+        Self(value.to_bits())
+    }
+
+    fn value(&self) -> f32 {
+        f32::from_bits(self.0)
     }
 }
 
@@ -492,7 +504,7 @@ impl Car {
         canvas: &mut Canvas<Window>,
         font_renderer: &mut FontRenderer<'_, 'tc>,
         texture_creator: &'tc render::TextureCreator<T>,
-    ) -> Result<(), RenderVectorError> {
+    ) -> Result<(), VectorRenderLabeledError> {
         // fun fact :
         // Implementing a text caching system made this function around 40 times faster
 
@@ -866,118 +878,47 @@ fn parse_color(color_str: &str) -> Option<Color> {
     }
 }
 
-fn draw_circle(
-    canvas: &mut Canvas<Window>,
-    x: i16,
-    y: i16,
-    radius: f32,
-    color: Color,
-) -> Result<(), sdl3::Error> {
-    canvas.set_draw_color(color);
-    let segments: i32 = 36;
-    for i in 0..segments {
-        let theta1: f32 = (i as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
-        let theta2: f32 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / (segments as f32);
-        let x1: f32 = x as f32 + radius * theta1.cos();
-        let y1: f32 = y as f32 + radius * theta1.sin();
-        let x2: f32 = x as f32 + radius * theta2.cos();
-        let y2: f32 = y as f32 + radius * theta2.sin();
-        canvas.draw_line((x1, y1), (x2, y2))?;
-    }
-    Ok(())
-}
-
-fn draw_disc(
-    canvas: &mut Canvas<Window>,
-    x: i16,
-    y: i16,
-    radius: f32,
-    color: Color,
-) -> Result<(), sdl3::Error> {
-    canvas.set_draw_color(color);
-    for i in -(radius as i16)..=(radius as i16) {
-        let y_offset = (radius * radius - (i as f32) * (i as f32)).sqrt() as i16;
-        for j in -y_offset..=y_offset {
-            canvas.draw_point((x as f32 + i as f32, y as f32 + j as f32))?;
-        }
-    }
-    Ok(())
-}
-
-fn render_joystick(
-    position: (u32, u32),
+fn render_joystick<'tc, T>(
+    center_pos: (u32, u32),
     direction: Vector,
     pressed: bool,
     canvas: &mut Canvas<Window>,
-) -> Result<(), sdl3::Error> {
-    let (x, y) = position;
-    draw_circle(
-        canvas,
-        x as i16,
-        y as i16,
-        JOYSTICK_OUTER_RADIUS,
-        Color::RGB(200, 200, 200),
-    )?;
-    let dir_x: f32 = x as f32 + direction.x.0 * JOYSTICK_MAX_REACH_RADIUS;
-    let dir_y: f32 = y as f32 - direction.y.0 * JOYSTICK_MAX_REACH_RADIUS;
-    draw_disc(
-        canvas,
-        dir_x as i16,
-        dir_y as i16,
-        JOYSTICK_INNER_RADIUS,
-        if pressed {
-            Color::RGB(125, 125, 125)
-        } else {
-            Color::RGB(175, 175, 175)
-        },
-    )?;
-    Ok(())
-}
-
-struct FontRenderer<'ft, 'tc> {
-    font: ttf::Font<'ft>,
-    texture_cache: HashMap<String, Rc<render::Texture<'tc>>>,
-    // used Rc to allow returning pointers to the texture even if the mutable borrow is dropped
-}
-
-impl<'ft, 'tc> FontRenderer<'ft, 'tc> {
-    fn init(font: ttf::Font<'ft>) -> Self {
-        Self {
-            font,
-            texture_cache: HashMap::new(),
-        }
-    }
-}
-
-fn get_positioned_texture<'tc, T>(
-    text: &str,
-    font_renderer: &mut FontRenderer<'_, 'tc>,
+    geometry_renderer: &mut GeometryRenderer<'tc>,
     texture_creator: &'tc render::TextureCreator<T>,
-) -> Result<PositionedTexture<'tc>, TextTextureError> {
-    if !font_renderer.texture_cache.contains_key(text) {
-        let surface = font_renderer
-            .font
-            .render(text)
-            .blended(Color::RGB(255, 255, 255))
-            .map_err(TextTextureError::FontRenderError)?;
+) -> Result<(), GeometryRenderError> {
+    let (center_x, center_y) = center_pos;
+    geometry_renderer
+        .get_positioned_texture(
+            GeometryShape::circle(JOYSTICK_OUTER_RADIUS, Color::RGB(200, 200, 200)),
+            texture_creator,
+            (
+                center_x as i32 - JOYSTICK_OUTER_RADIUS as i32,
+                center_y as i32 - JOYSTICK_OUTER_RADIUS as i32,
+            ),
+        )?
+        .render_onto(canvas)
+        .map_err(GeometryRenderError::TextureCopy)?;
 
-        let texture = texture_creator
-            .create_texture_from_surface(&surface)
-            .map_err(TextTextureError::CreateTextureError)?;
-
-        font_renderer
-            .texture_cache
-            .insert(text.to_string(), Rc::new(texture));
-    }
-
-    let texture = font_renderer.texture_cache.get(text).unwrap();
-    let query = texture.query();
-    let rect = rect::Rect::new(0, 0, query.width, query.height);
-
-    Ok(PositionedTexture {
-        texture: Rc::clone(texture),
-        rect,
-    })
+    let pos_x: f32 =
+        center_x as f32 + direction.x.0 * JOYSTICK_MAX_REACH_RADIUS - JOYSTICK_INNER_RADIUS;
+    let pos_y: f32 =
+        center_y as f32 - direction.y.0 * JOYSTICK_MAX_REACH_RADIUS - JOYSTICK_INNER_RADIUS;
+    geometry_renderer
+        .get_positioned_texture(
+            GeometryShape::disc(
+                JOYSTICK_INNER_RADIUS,
+                if pressed {
+                    Color::RGB(125, 125, 125)
+                } else {
+                    Color::RGB(175, 175, 175)
+                },
+            ),
+            texture_creator,
+            (pos_x as i32, pos_y as i32),
+        )?
+        .render_onto(canvas)
+        .map_err(GeometryRenderError::TextureCopy)?;
+    Ok(())
 }
 
 struct PositionedTexture<'tc> {
@@ -999,21 +940,210 @@ impl<'tc> PositionedTexture<'tc> {
     fn height(&self) -> i32 {
         self.rect.height() as i32
     }
+
+    fn render_onto(&self, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
+        canvas.copy(&self.texture, None, self.rect)?;
+        Ok(())
+    }
+}
+
+// TODO: Consider making GeometryShape a trait instead of an enum
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+enum GeometryShape {
+    Circle { radius: Hashf32, color: Color },
+    Disc { radius: Hashf32, color: Color },
+}
+
+impl GeometryShape {
+    fn circle(radius: f32, color: Color) -> Self {
+        Self::Circle {
+            radius: Hashf32::new(radius),
+            color,
+        }
+    }
+
+    fn disc(radius: f32, color: Color) -> Self {
+        Self::Disc {
+            radius: Hashf32::new(radius),
+            color,
+        }
+    }
+
+    fn width(&self) -> u32 {
+        match self {
+            // the 2.05 factor is used to slightly increase the size to account for rounding errors
+            GeometryShape::Circle { radius, .. } => (radius.value() * 2.05).ceil() as u32,
+            GeometryShape::Disc { radius, .. } => (radius.value() * 2.05).ceil() as u32,
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            // the 2.05 factor is used to slightly increase the size to account for rounding errors
+            GeometryShape::Circle { radius, .. } => (radius.value() * 2.05).ceil() as u32,
+            GeometryShape::Disc { radius, .. } => (radius.value() * 2.05).ceil() as u32,
+        }
+    }
+
+    fn draw<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+        match self {
+            GeometryShape::Circle { radius, color } => {
+                canvas.set_draw_color(*color);
+
+                let radius: f32 = radius.value();
+                for i in 0..36 {
+                    let theta1: f32 = (i as f32) * 2.0 * std::f32::consts::PI / 36.;
+                    let theta2: f32 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / 36.;
+                    let x1: f32 = radius * theta1.cos() + radius;
+                    let y1: f32 = radius * theta1.sin() + radius;
+                    let x2: f32 = radius * theta2.cos() + radius;
+                    let y2: f32 = radius * theta2.sin() + radius;
+                    canvas.draw_line((x1, y1), (x2, y2))?;
+                }
+                Ok(())
+            }
+            GeometryShape::Disc { radius, color } => {
+                canvas.set_draw_color(*color);
+
+                let radius: f32 = radius.value();
+                for i in -(radius as i16)..=(radius as i16) {
+                    let y_offset = (radius * radius - (i as f32) * (i as f32)).sqrt() as i16;
+                    for j in -y_offset..=y_offset {
+                        canvas.draw_point((radius + i as f32, radius + j as f32))?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+// TODO: Consider including the texture creator in the struct
+//       If not doing so can cause an invalid texture render (when working with multiple canvas)
+struct GeometryRenderer<'tc> {
+    // floats do not implement the Hash trait!!
+    // we store the float as a u32 using to_bits() for hashing purposes
+    texture_cache: HashMap<GeometryShape, Rc<render::Texture<'tc>>>,
+}
+
+impl<'tc> GeometryRenderer<'tc> {
+    fn init() -> GeometryRenderer<'tc> {
+        Self {
+            texture_cache: HashMap::new(),
+        }
+    }
+
+    fn get_texture<T>(
+        &mut self,
+        shape: GeometryShape,
+        texture_creator: &'tc render::TextureCreator<T>,
+    ) -> Result<Rc<render::Texture<'tc>>, GeometryRenderError> {
+        // used pattern matching on Entry::Vacant to avoid clippy's map_entry warning
+        if let hash_map::Entry::Vacant(entry) = self.texture_cache.entry(shape) {
+            let empty_surface =
+                Surface::new(shape.width(), shape.height(), pixels::PixelFormat::RGBA32)
+                    .map_err(GeometryRenderError::SurfaceCreation)?;
+
+            let mut canvas = empty_surface
+                .into_canvas()
+                .map_err(GeometryRenderError::SurfaceToCanvas)?;
+
+            shape
+                .draw(&mut canvas)
+                .map_err(GeometryRenderError::CanvasDraw)?;
+
+            let surface = canvas.into_surface();
+
+            let texture = texture_creator
+                .create_texture_from_surface(&surface)
+                .map_err(GeometryRenderError::TextureCreation)?;
+
+            entry.insert(Rc::new(texture));
+        }
+
+        Ok(Rc::clone(self.texture_cache.get(&shape).unwrap()))
+    }
+
+    fn get_positioned_texture<T>(
+        &mut self,
+        shape: GeometryShape,
+        texture_creator: &'tc render::TextureCreator<T>,
+        position: (i32, i32),
+    ) -> Result<PositionedTexture<'tc>, GeometryRenderError> {
+        self.get_texture(shape, texture_creator)?;
+
+        let texture = self.texture_cache.get(&shape).unwrap();
+        let query = texture.query();
+        let rect = rect::Rect::new(position.0, position.1, query.width, query.height);
+
+        Ok(PositionedTexture {
+            texture: Rc::clone(texture),
+            rect,
+        })
+    }
+}
+
+#[allow(dead_code)]
+enum GeometryRenderError {
+    SurfaceCreation(sdl3::Error),
+    SurfaceToCanvas(sdl3::Error),
+    CanvasDraw(sdl3::Error),
+    TextureCreation(render::TextureValueError),
+    TextureCopy(sdl3::Error),
+}
+
+struct FontRenderer<'ft, 'tc> {
+    font: ttf::Font<'ft>,
+    texture_cache: HashMap<String, Rc<render::Texture<'tc>>>,
+    // used Rc to allow returning pointers to the texture even if the mutable borrow is dropped
+}
+
+impl<'ft, 'tc> FontRenderer<'ft, 'tc> {
+    fn init(font: ttf::Font<'ft>) -> Self {
+        Self {
+            font,
+            texture_cache: HashMap::new(),
+        }
+    }
+}
+
+// TODO: Implement multi-color support for the caching system
+fn get_positioned_texture<'tc, T>(
+    text: &str,
+    font_renderer: &mut FontRenderer<'_, 'tc>,
+    texture_creator: &'tc render::TextureCreator<T>,
+) -> Result<PositionedTexture<'tc>, TextRenderError> {
+    if !font_renderer.texture_cache.contains_key(text) {
+        let surface = font_renderer
+            .font
+            .render(text)
+            .blended(Color::RGB(255, 255, 255))
+            .map_err(TextRenderError::FontRender)?;
+
+        let texture = texture_creator
+            .create_texture_from_surface(&surface)
+            .map_err(TextRenderError::TextureCreation)?;
+
+        font_renderer
+            .texture_cache
+            .insert(text.to_string(), Rc::new(texture));
+    }
+
+    let texture = font_renderer.texture_cache.get(text).unwrap();
+    let query = texture.query();
+    let rect = rect::Rect::new(0, 0, query.width, query.height);
+
+    Ok(PositionedTexture {
+        texture: Rc::clone(texture),
+        rect,
+    })
 }
 
 #[derive(Debug)]
 #[allow(dead_code)]
-enum TextTextureError {
-    FontRenderError(ttf::FontError),
-    CreateTextureError(render::TextureValueError),
-}
-
-fn render_text(
-    canvas: &mut Canvas<Window>,
-    posed_texture: &PositionedTexture,
-) -> Result<(), sdl3::Error> {
-    canvas.copy(&posed_texture.texture, None, posed_texture.rect)?;
-    Ok(())
+enum TextRenderError {
+    FontRender(ttf::FontError),
+    TextureCreation(render::TextureValueError),
 }
 
 const CAMERA_WIDTH: u32 = 1200;
@@ -1152,16 +1282,17 @@ pub fn main() {
         }
     }
 
-    // Implement mouse and keyboard controls for the car
-    let mut joystick_pressed: bool = false;
+    // GUI
+    let mut joystick_gui_pressed: bool = false;
 
-    // Initialize the TTF context for rendering text
+    // Initialize Renderers
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
     let mut font_renderer: FontRenderer = FontRenderer::init(
         ttf_context
             .load_font("assets/Basic-Regular.ttf", 25.)
             .unwrap(),
     );
+    let mut geometry_renderer: GeometryRenderer = GeometryRenderer::init();
 
     // Render text textures
     let mut hold_space_posed_texture = get_positioned_texture(
@@ -1215,6 +1346,9 @@ pub fn main() {
         let time: time::Instant = time::Instant::now();
         let mut timestamps: Vec<u128> = Vec::new();
 
+        let mut acceleration_pressed: bool = false;
+        let mut joystick_direction: Vector = Vector::init(0.0, 0.0);
+
         // Read the events
         for event in event_pump.poll_iter() {
             match event {
@@ -1239,24 +1373,20 @@ pub fn main() {
                         + (y - JOYSTICK_POSITION.1 as f32).powi(2))
                     .sqrt();
                     if dist_to_joystick < JOYSTICK_INNER_RADIUS {
-                        joystick_pressed = true;
+                        joystick_gui_pressed = true;
                     }
                 }
                 Event::MouseButtonUp {
                     mouse_btn: MouseButton::Left,
                     ..
                 } => {
-                    joystick_pressed = false;
+                    joystick_gui_pressed = false;
                 }
                 _ => (),
             }
         }
 
         let keyboard_state: KeyboardState<'_> = event_pump.keyboard_state();
-        let space_pressed: bool = keyboard_state.is_scancode_pressed(Scancode::Space);
-
-        let mut acceleration_pressed: bool = false;
-        let mut joystick_direction = Vector::init(0.0, 0.0);
 
         // Read joystick input
         if let Some(js) = &joystick {
@@ -1267,8 +1397,9 @@ pub fn main() {
         }
 
         // Read mouse and keyboard output
+        let space_pressed: bool = keyboard_state.is_scancode_pressed(Scancode::Space);
         acceleration_pressed |= space_pressed;
-        if joystick_pressed {
+        if joystick_gui_pressed {
             let mouse_x: f32 = event_pump.mouse_state().x();
             let mouse_y: f32 = event_pump.mouse_state().y();
             let dx: f32 = mouse_x - JOYSTICK_POSITION.0 as f32;
@@ -1313,8 +1444,6 @@ pub fn main() {
 
         // Update the car's coordinates based on its current acceleration and velocity
         car.update_coords(DT);
-        // println!("Theoretical max speed: {}km/h", THEORETICAL_MAX_SPEED * 3.6);
-        // println!("Car acceleration: {}km/h", car.velocity.norm().0 * 3.6);
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -1401,13 +1530,13 @@ pub fn main() {
         }
 
         // Write "PRESS ENTER TO TOGGLE CAMERAS"
-        failed_rendering |= render_text(&mut canvas, &hold_space_posed_texture).is_err();
+        failed_rendering |= hold_space_posed_texture.render_onto(&mut canvas).is_err();
 
         // Render controller name
-        failed_rendering |= render_text(&mut canvas, &js_name_posed_texture).is_err();
+        failed_rendering |= js_name_posed_texture.render_onto(&mut canvas).is_err();
 
         // Render seed text
-        failed_rendering |= render_text(&mut canvas, &seed_posed_texture).is_err();
+        failed_rendering |= seed_posed_texture.render_onto(&mut canvas).is_err();
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -1428,6 +1557,8 @@ pub fn main() {
             joystick_direction,
             acceleration_pressed,
             &mut canvas,
+            &mut geometry_renderer,
+            &texture_creator,
         )
         .is_err();
 
@@ -1444,7 +1575,10 @@ pub fn main() {
 
         // Detect failed rendering attempts
         if failed_rendering {
-            eprintln!("Warning: Failed rendering one or more elements.");
+            eprintln!(
+                "Warning: Failed rendering one or more elements on frame {}.",
+                game_tick_counter
+            );
         }
 
         // Compute the average FPS
@@ -1469,9 +1603,16 @@ pub fn main() {
 
         // If average frame rate drops below 80% of the frame target, log a warning
         if average_fps < 0.8 * GAME_FPS {
-            eprintln!("Warning: Frame rate dropped below 80% of the target.");
+            eprintln!(
+                "Warning: Average FPS dropped below 80% of the target on frame {}.",
+                game_tick_counter
+            );
             log_fps = true;
             LOG_PERF_ON_LAG.then(|| log_perf = true);
+        }
+
+        if log_fps || log_perf {
+            println!("Frame {}:", game_tick_counter);
         }
 
         if log_fps {
@@ -1505,6 +1646,10 @@ pub fn main() {
                 );
                 last_timestamp = *timestamp;
             }
+        }
+
+        if log_fps || log_perf {
+            println!();
         }
 
         game_tick_counter += 1;

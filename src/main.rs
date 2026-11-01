@@ -13,8 +13,9 @@ use sdl3::{
     video::{Window, WindowContext},
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     iter, ops,
+    rc::Rc,
     time::{self, Duration},
 };
 use svg::{node::element::tag, parser};
@@ -150,7 +151,6 @@ impl Vector {
         base_point: Coords,
         camera: &Camera,
         canvas: &mut Canvas<Window>,
-        label: Option<(&str, &TextRendererConfig)>,
     ) -> Result<(), RenderVectorError> {
         if self.norm().0 < 0.5 {
             return Ok(());
@@ -172,14 +172,30 @@ impl Vector {
         canvas
             .draw_line(end, arrow_tip2)
             .map_err(RenderVectorError::SdlError)?;
-        if let Some(label) = label {
-            let tip_point: rect::Point = (base_point + *self).as_point(camera);
-            let mut label_render_info = text_render_info(label.0, label.1)
-                .map_err(RenderVectorError::TextRenderInfoError)?;
-            label_render_info.rect.x = tip_point.x - label_render_info.width() / 2;
-            label_render_info.rect.y = tip_point.y - label_render_info.height() / 2;
-            render_text(canvas, &label_render_info).map_err(RenderVectorError::SdlError)?;
+
+        Ok(())
+    }
+
+    fn render_labeled<'tc, T>(
+        &self,
+        base_point: Coords,
+        camera: &Camera,
+        canvas: &mut Canvas<Window>,
+        label: &str,
+        font_renderer: &mut FontRenderer<'_, 'tc>,
+        texture_creator: &'tc render::TextureCreator<T>,
+    ) -> Result<(), RenderVectorError> {
+        if self.norm().0 < 0.5 {
+            return Ok(());
         }
+
+        self.render(base_point, camera, canvas)?;
+        let tip_point: rect::Point = (base_point + *self).as_point(camera);
+        let mut label_render_info = get_positioned_texture(label, font_renderer, texture_creator)
+            .map_err(RenderVectorError::TextTextureError)?;
+        label_render_info.rect.x = tip_point.x - label_render_info.width() / 2;
+        label_render_info.rect.y = tip_point.y - label_render_info.height() / 2;
+        render_text(canvas, &label_render_info).map_err(RenderVectorError::SdlError)?;
         Ok(())
     }
 }
@@ -188,7 +204,7 @@ impl Vector {
 #[derive(Debug)]
 enum RenderVectorError {
     SdlError(sdl3::Error),
-    TextRenderInfoError(TextRenderInfoError),
+    TextTextureError(TextTextureError),
 }
 
 impl ops::Add for Vector {
@@ -414,7 +430,7 @@ impl Car {
                 // parse into an sdl3 RGB
                 let color: Color = attributes
                     .get("fill")
-                    .map(|s| parse_color(s))
+                    .map(|s| parse_color(s).unwrap_or(Color::BLACK))
                     .unwrap_or(Color::BLACK);
                 let mut polygon: Polygon = Polygon::from_vertices(
                     &points
@@ -470,42 +486,54 @@ impl Car {
         Ok(())
     }
 
-    fn render_debug_vectors(
+    fn render_debug_vectors<'tc, T>(
         &self,
         camera: &Camera,
         canvas: &mut Canvas<Window>,
-        text_renderer_config: &TextRendererConfig,
+        font_renderer: &mut FontRenderer<'_, 'tc>,
+        texture_creator: &'tc render::TextureCreator<T>,
     ) -> Result<(), RenderVectorError> {
+        // fun fact :
+        // Implementing a text caching system made this function around 40 times faster
+
         let debug_scalar: f32 = 0.3;
         let base_point: Coords = self.coords;
         let friction_acc = -self.friction_factor * self.velocity;
         canvas.set_draw_color(Color::RGB(255, 0, 0));
-        (debug_scalar * self.velocity).render(
+        (debug_scalar * self.velocity).render_labeled(
             base_point,
             camera,
             canvas,
-            Some(("v", text_renderer_config)),
+            "v",
+            font_renderer,
+            texture_creator,
         )?;
         canvas.set_draw_color(Color::RGB(0, 0, 255));
-        (debug_scalar.powi(2) * self.engine_acc).render(
+        (debug_scalar.powi(2) * self.engine_acc).render_labeled(
             base_point,
             camera,
             canvas,
-            Some(("p", text_renderer_config)),
+            "p",
+            font_renderer,
+            texture_creator,
         )?;
         canvas.set_draw_color(Color::RGB(0, 255, 0));
-        (debug_scalar.powi(2) * friction_acc).render(
+        (debug_scalar.powi(2) * friction_acc).render_labeled(
             base_point,
             camera,
             canvas,
-            Some(("f", text_renderer_config)),
+            "f",
+            font_renderer,
+            texture_creator,
         )?;
         canvas.set_draw_color(Color::RGB(255, 255, 0));
-        (debug_scalar.powi(2) * (self.engine_acc + friction_acc)).render(
+        (debug_scalar.powi(2) * (self.engine_acc + friction_acc)).render_labeled(
             base_point,
             camera,
             canvas,
-            Some(("a", text_renderer_config)),
+            "a",
+            font_renderer,
+            texture_creator,
         )?;
         Ok(())
     }
@@ -827,14 +855,14 @@ impl BezierPath {
     }
 }
 
-fn parse_color(color_str: &str) -> Color {
+fn parse_color(color_str: &str) -> Option<Color> {
     if color_str.starts_with('#') && color_str.len() == 7 {
-        let r: u8 = u8::from_str_radix(&color_str[1..3], 16).unwrap_or(0);
-        let g: u8 = u8::from_str_radix(&color_str[3..5], 16).unwrap_or(0);
-        let b: u8 = u8::from_str_radix(&color_str[5..7], 16).unwrap_or(0);
-        Color::RGB(r, g, b)
+        let r: u8 = u8::from_str_radix(&color_str[1..3], 16).ok()?;
+        let g: u8 = u8::from_str_radix(&color_str[3..5], 16).ok()?;
+        let b: u8 = u8::from_str_radix(&color_str[5..7], 16).ok()?;
+        Some(Color::RGB(r, g, b))
     } else {
-        Color::RGB(0, 0, 0)
+        None
     }
 }
 
@@ -906,17 +934,59 @@ fn render_joystick(
     Ok(())
 }
 
-struct TextRendererConfig<'a> {
-    font: ttf::Font<'a>,
-    texture_creator: render::TextureCreator<WindowContext>,
+struct FontRenderer<'ft, 'tc> {
+    font: ttf::Font<'ft>,
+    texture_cache: HashMap<String, Rc<render::Texture<'tc>>>,
+    // used Rc to allow returning pointers to the texture even if the mutable borrow is dropped
 }
 
-struct TextRenderInfo<'a> {
-    texture: render::Texture<'a>,
+impl<'ft, 'tc> FontRenderer<'ft, 'tc> {
+    fn init(font: ttf::Font<'ft>) -> Self {
+        Self {
+            font,
+            texture_cache: HashMap::new(),
+        }
+    }
+}
+
+fn get_positioned_texture<'tc, T>(
+    text: &str,
+    font_renderer: &mut FontRenderer<'_, 'tc>,
+    texture_creator: &'tc render::TextureCreator<T>,
+) -> Result<PositionedTexture<'tc>, TextTextureError> {
+    if !font_renderer.texture_cache.contains_key(text) {
+        let surface = font_renderer
+            .font
+            .render(text)
+            .blended(Color::RGB(255, 255, 255))
+            .map_err(TextTextureError::FontRenderError)?;
+
+        let texture = texture_creator
+            .create_texture_from_surface(&surface)
+            .map_err(TextTextureError::CreateTextureError)?;
+
+        font_renderer
+            .texture_cache
+            .insert(text.to_string(), Rc::new(texture));
+    }
+
+    let texture = font_renderer.texture_cache.get(text).unwrap();
+    let query = texture.query();
+    let rect = rect::Rect::new(0, 0, query.width, query.height);
+
+    Ok(PositionedTexture {
+        texture: Rc::clone(texture),
+        rect,
+    })
+}
+
+struct PositionedTexture<'tc> {
+    // 'tc is the lifetime of the texture creator
+    texture: Rc<render::Texture<'tc>>,
     rect: rect::Rect,
 }
 
-impl TextRenderInfo<'_> {
+impl<'tc> PositionedTexture<'tc> {
     fn set_pos(&mut self, x: i32, y: i32) {
         self.rect.set_x(x);
         self.rect.set_y(y);
@@ -931,35 +1001,18 @@ impl TextRenderInfo<'_> {
     }
 }
 
-fn text_render_info<'a>(
-    text: &str,
-    text_renderer_config: &'a TextRendererConfig,
-) -> Result<TextRenderInfo<'a>, TextRenderInfoError> {
-    let surface = text_renderer_config
-        .font
-        .render(text)
-        .blended(Color::RGB(255, 255, 255))
-        .map_err(TextRenderInfoError::FontRenderError)?;
-    let texture = text_renderer_config
-        .texture_creator
-        .create_texture_from_surface(&surface)
-        .map_err(TextRenderInfoError::CreateTextureError)?;
-    let rect = rect::Rect::new(0, 0, surface.width(), surface.height());
-    Ok(TextRenderInfo { texture, rect })
-}
-
 #[derive(Debug)]
 #[allow(dead_code)]
-enum TextRenderInfoError {
+enum TextTextureError {
     FontRenderError(ttf::FontError),
     CreateTextureError(render::TextureValueError),
 }
 
 fn render_text(
     canvas: &mut Canvas<Window>,
-    render_info: &TextRenderInfo,
+    posed_texture: &PositionedTexture,
 ) -> Result<(), sdl3::Error> {
-    canvas.copy(&render_info.texture, None, render_info.rect)?;
+    canvas.copy(&posed_texture.texture, None, posed_texture.rect)?;
     Ok(())
 }
 
@@ -993,25 +1046,23 @@ const MOUVEMENT_DEBUG: bool = true;
 const DEBUG_MAX_FPS: bool = false;
 const REGULAR_LOG_FPS: bool = true;
 const REGULAR_LOG_PERF: bool = true;
-const REGULARITY_INTERVAL: u32 = 60;
+const REGULARITY_INTERVAL: u32 = 60 * 3;
 const LOG_PERF_ON_LAG: bool = true;
 
 const VSYNC: bool = true && !DEBUG_MAX_FPS;
 
-const DEBUG_PERFORMANCE_LABELS: [&str; 13] = [
-    "           Input Handeling",
-    "            Car Collisions",
-    "               Car Physics",
-    "          Camera Selection",
-    "           Screen Clearing",
-    "   Enclosed Area Rendering",
-    "    Circuit Path Rendering",
-    "[DEBUG] Circuit Generation",
-    "             Car Rendering",
-    "      [DEBUG] Car Movement",
-    "            Text Rendering",
-    "      Side Panel Rendering",
-    "             Screen Update",
+const DEBUG_PERFORMANCE_LABELS: [&str; 11] = [
+    "             Input Handeling",
+    "                   Car Logic",
+    "             Screen Clearing",
+    "     Enclosed Area Rendering",
+    "      Circuit Path Rendering",
+    "Circuit Generation Debugging",
+    "               Car Rendering",
+    "      Car Movement Debugging",
+    "              Text Rendering",
+    "        Side Panel Rendering",
+    "               Screen Update",
 ];
 
 const GAME_FPS: f32 = 60.0;
@@ -1034,6 +1085,9 @@ pub fn main() {
 
     // Transform the window into a canvas
     let mut canvas: Canvas<Window> = window.into_canvas();
+
+    // Initialize a texture creator
+    let texture_creator: render::TextureCreator<WindowContext> = canvas.texture_creator();
 
     // Setup a game tick counter
     let mut game_tick_counter: u32 = 0;
@@ -1103,54 +1157,56 @@ pub fn main() {
 
     // Initialize the TTF context for rendering text
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
-    let text_renderer_config: TextRendererConfig = TextRendererConfig {
-        font: ttf_context
+    let mut font_renderer: FontRenderer = FontRenderer::init(
+        ttf_context
             .load_font("assets/Basic-Regular.ttf", 25.)
             .unwrap(),
-        texture_creator: canvas.texture_creator(),
-    };
-
-    // Instantiate text render info for displaying instructions and information
-    let mut hold_space_render_info: TextRenderInfo<'_> =
-        text_render_info("PRESS ENTER TO TOGGLE CAMERAS", &text_renderer_config).unwrap();
-    // TODO : Implement position specification for `text_render_info` to avoid having to
-    //        call `set_pos` separately
-    hold_space_render_info.set_pos(
-        10,
-        SCREEN_HEIGHT as i32 - hold_space_render_info.height() - 10,
     );
 
-    let mut js_name_render_info: TextRenderInfo<'_> =
-        text_render_info("No controller detected at startup", &text_renderer_config).unwrap();
+    // Render text textures
+    let mut hold_space_posed_texture = get_positioned_texture(
+        "PRESS ENTER TO TOGGLE CAMERAS",
+        &mut font_renderer,
+        &texture_creator,
+    )
+    .unwrap();
+    // TODO : Implement position specification for `text_posed_texture` to avoid having to
+    //        call `set_pos` separately
+    hold_space_posed_texture.set_pos(
+        10,
+        SCREEN_HEIGHT as i32 - hold_space_posed_texture.height() - 10,
+    );
+
+    let mut js_name_posed_texture = get_positioned_texture(
+        "No controller detected at startup",
+        &mut font_renderer,
+        &texture_creator,
+    )
+    .unwrap();
     if let Some(js) = &joystick {
         println!("Joystick connected: {:?}", js.name());
-        js_name_render_info =
-            text_render_info(&format!("Controller: {}", js.name()), &text_renderer_config).unwrap();
+        js_name_posed_texture = get_positioned_texture(
+            &format!("Controller: {}", js.name()),
+            &mut font_renderer,
+            &texture_creator,
+        )
+        .unwrap();
     }
-    js_name_render_info.set_pos(SCREEN_WIDTH as i32 - js_name_render_info.width() - 10, 10);
+    js_name_posed_texture.set_pos(SCREEN_WIDTH as i32 - js_name_posed_texture.width() - 10, 10);
 
-    let mut seed_render_info: TextRenderInfo<'_> =
-        text_render_info(&format!("SEED: {}", seed), &text_renderer_config).unwrap();
-    seed_render_info.set_pos(10, 10);
+    let mut seed_posed_texture = get_positioned_texture(
+        &format!("SEED: {}", seed),
+        &mut font_renderer,
+        &texture_creator,
+    )
+    .unwrap();
+    seed_posed_texture.set_pos(10, 10);
 
     // Initialize an FPS sample queue to monitor average FPS across 3 seconds
     let mut fps_sample: VecDeque<f32> = VecDeque::with_capacity(3 * GAME_FPS as usize);
     for _ in 0..(3 * GAME_FPS as usize) {
         fps_sample.push_back(GAME_FPS);
     }
-
-    // Performance debugging
-
-    // Add left paddings to debug performance labels for better alignment
-    // let max_label_length = debug_performance_labels
-    //     .iter()
-    //     .map(|label| label.len())
-    //     .max()
-    //     .unwrap_or(0);
-    // for label in &mut debug_performance_labels {
-    //     let padding = max_label_length - label.len();
-    //     *label = format!("{}{}", " ".repeat(padding), label);
-    // }
 
     // Initialize the event pump for handling SDL events
     let mut event_pump: sdl3::EventPump = sdl_context.event_pump().unwrap();
@@ -1223,6 +1279,10 @@ pub fn main() {
             }
         }
 
+        if REGULAR_LOG_PERF {
+            timestamps.push(time.elapsed().as_micros());
+        }
+
         // Apply player input to the car's acceleration
         if acceleration_pressed {
             let engine_acc_vec = if joystick_direction.norm().0 < 0.2 {
@@ -1233,10 +1293,6 @@ pub fn main() {
             car.set_engine_acc(ENGINE_ACCELERATION * engine_acc_vec);
         } else {
             car.set_engine_acc(Vector::init(0.0, 0.0));
-        }
-
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
         }
 
         // Check if any of the 4 corners of the car rect is outside the circuit polygon
@@ -1253,10 +1309,6 @@ pub fn main() {
             car.set_friction_factor(FRICTION_FACTOR);
         } else {
             car.set_friction_factor(friction_multiplier * FRICTION_FACTOR);
-        }
-
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
         }
 
         // Update the car's coordinates based on its current acceleration and velocity
@@ -1277,10 +1329,6 @@ pub fn main() {
         } else {
             &fix_camera
         };
-
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
-        }
 
         // Start rendering
         let mut failed_rendering: bool = false;
@@ -1339,7 +1387,12 @@ pub fn main() {
         // Debug car vectors
         if MOUVEMENT_DEBUG {
             failed_rendering |= car
-                .render_debug_vectors(current_camera, &mut canvas, &text_renderer_config)
+                .render_debug_vectors(
+                    current_camera,
+                    &mut canvas,
+                    &mut font_renderer,
+                    &texture_creator,
+                )
                 .is_err();
         }
 
@@ -1348,13 +1401,13 @@ pub fn main() {
         }
 
         // Write "PRESS ENTER TO TOGGLE CAMERAS"
-        failed_rendering |= render_text(&mut canvas, &hold_space_render_info).is_err();
+        failed_rendering |= render_text(&mut canvas, &hold_space_posed_texture).is_err();
 
         // Render controller name
-        failed_rendering |= render_text(&mut canvas, &js_name_render_info).is_err();
+        failed_rendering |= render_text(&mut canvas, &js_name_posed_texture).is_err();
 
         // Render seed text
-        failed_rendering |= render_text(&mut canvas, &seed_render_info).is_err();
+        failed_rendering |= render_text(&mut canvas, &seed_posed_texture).is_err();
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());

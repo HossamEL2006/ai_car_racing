@@ -15,6 +15,7 @@ use sdl3::{
 };
 use std::{
     collections::{HashMap, VecDeque, hash_map},
+    hash::Hash,
     iter, ops,
     rc::Rc,
     time::{self, Duration},
@@ -192,7 +193,7 @@ impl Vector {
         label_posed_texture.rect.x = tip_point.x - label_posed_texture.width() / 2;
         label_posed_texture.rect.y = tip_point.y - label_posed_texture.height() / 2;
         label_posed_texture
-            .render_onto(canvas)
+            .draw_onto(canvas)
             .map_err(VectorRenderLabeledError::LabelRender)?;
         Ok(())
     }
@@ -878,49 +879,54 @@ fn parse_color(color_str: &str) -> Option<Color> {
     }
 }
 
-fn render_joystick<'tc, T>(
+fn render_joystick<'tc, T: render::RenderTarget, U>(
     center_pos: (u32, u32),
     direction: Vector,
     pressed: bool,
-    canvas: &mut Canvas<Window>,
-    geometry_renderer: &mut GeometryRenderer<'tc>,
-    texture_creator: &'tc render::TextureCreator<T>,
-) -> Result<(), GeometryRenderError> {
+    canvas: &mut Canvas<T>,
+    texture_creator: &'tc render::TextureCreator<U>,
+    geometry_cache: &mut GeometryCache<'tc>,
+) -> Result<(), CacheableGeometryError> {
     let (center_x, center_y) = center_pos;
-    geometry_renderer
-        .get_positioned_texture(
-            GeometryShape::circle(JOYSTICK_OUTER_RADIUS, Color::RGB(200, 200, 200)),
-            texture_creator,
-            (
-                center_x as i32 - JOYSTICK_OUTER_RADIUS as i32,
-                center_y as i32 - JOYSTICK_OUTER_RADIUS as i32,
-            ),
-        )?
-        .render_onto(canvas)
-        .map_err(GeometryRenderError::TextureCopy)?;
+    Circle {
+        radius: JOYSTICK_OUTER_RADIUS,
+        color: Color::RGB(200, 200, 200),
+    }
+    .draw_onto(
+        canvas,
+        texture_creator,
+        geometry_cache,
+        (center_x as i32, center_y as i32),
+        PositionType::Center,
+    )?;
 
-    let pos_x: f32 =
-        center_x as f32 + direction.x.0 * JOYSTICK_MAX_REACH_RADIUS - JOYSTICK_INNER_RADIUS;
-    let pos_y: f32 =
-        center_y as f32 - direction.y.0 * JOYSTICK_MAX_REACH_RADIUS - JOYSTICK_INNER_RADIUS;
-    geometry_renderer
-        .get_positioned_texture(
-            GeometryShape::disc(
-                JOYSTICK_INNER_RADIUS,
-                if pressed {
-                    Color::RGB(125, 125, 125)
-                } else {
-                    Color::RGB(175, 175, 175)
-                },
-            ),
-            texture_creator,
-            (pos_x as i32, pos_y as i32),
-        )?
-        .render_onto(canvas)
-        .map_err(GeometryRenderError::TextureCopy)?;
+    let pos_x: f32 = center_x as f32 + direction.x.0 * JOYSTICK_MAX_REACH_RADIUS;
+    let pos_y: f32 = center_y as f32 - direction.y.0 * JOYSTICK_MAX_REACH_RADIUS;
+
+    Disc {
+        radius: JOYSTICK_INNER_RADIUS,
+        color: if pressed {
+            Color::RGB(125, 125, 125)
+        } else {
+            Color::RGB(175, 175, 175)
+        },
+    }
+    .draw_onto(
+        canvas,
+        texture_creator,
+        geometry_cache,
+        (pos_x as i32, pos_y as i32),
+        PositionType::Center,
+    )?;
     Ok(())
 }
 
+enum PositionType {
+    TopLeft,
+    Center,
+}
+
+// TODO: Consider deleting this struct once everything (including font) implement CacheableGeometry
 struct PositionedTexture<'tc> {
     // 'tc is the lifetime of the texture creator
     texture: Rc<render::Texture<'tc>>,
@@ -941,155 +947,197 @@ impl<'tc> PositionedTexture<'tc> {
         self.rect.height() as i32
     }
 
-    fn render_onto(&self, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
+    fn draw_onto<T: render::RenderTarget>(
+        &self,
+        canvas: &mut Canvas<T>,
+    ) -> Result<(), sdl3::Error> {
         canvas.copy(&self.texture, None, self.rect)?;
         Ok(())
     }
 }
 
-// TODO: Consider making GeometryShape a trait instead of an enum
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
-enum GeometryShape {
+enum HashableGeometryProps {
     Circle { radius: Hashf32, color: Color },
     Disc { radius: Hashf32, color: Color },
 }
 
-impl GeometryShape {
-    fn circle(radius: f32, color: Color) -> Self {
-        Self::Circle {
-            radius: Hashf32::new(radius),
-            color,
-        }
-    }
+trait CacheableGeometry {
+    fn geometry_props(&self) -> HashableGeometryProps;
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
+    fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error>;
 
-    fn disc(radius: f32, color: Color) -> Self {
-        Self::Disc {
-            radius: Hashf32::new(radius),
-            color,
-        }
-    }
-
-    fn width(&self) -> u32 {
-        match self {
-            // the 2.05 factor is used to slightly increase the size to account for rounding errors
-            GeometryShape::Circle { radius, .. } => (radius.value() * 2.05).ceil() as u32,
-            GeometryShape::Disc { radius, .. } => (radius.value() * 2.05).ceil() as u32,
-        }
-    }
-
-    fn height(&self) -> u32 {
-        match self {
-            // the 2.05 factor is used to slightly increase the size to account for rounding errors
-            GeometryShape::Circle { radius, .. } => (radius.value() * 2.05).ceil() as u32,
-            GeometryShape::Disc { radius, .. } => (radius.value() * 2.05).ceil() as u32,
-        }
-    }
-
-    fn draw<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
-        match self {
-            GeometryShape::Circle { radius, color } => {
-                canvas.set_draw_color(*color);
-
-                let radius: f32 = radius.value();
-                for i in 0..36 {
-                    let theta1: f32 = (i as f32) * 2.0 * std::f32::consts::PI / 36.;
-                    let theta2: f32 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / 36.;
-                    let x1: f32 = radius * theta1.cos() + radius;
-                    let y1: f32 = radius * theta1.sin() + radius;
-                    let x2: f32 = radius * theta2.cos() + radius;
-                    let y2: f32 = radius * theta2.sin() + radius;
-                    canvas.draw_line((x1, y1), (x2, y2))?;
-                }
-                Ok(())
-            }
-            GeometryShape::Disc { radius, color } => {
-                canvas.set_draw_color(*color);
-
-                let radius: f32 = radius.value();
-                for i in -(radius as i16)..=(radius as i16) {
-                    let y_offset = (radius * radius - (i as f32) * (i as f32)).sqrt() as i16;
-                    for j in -y_offset..=y_offset {
-                        canvas.draw_point((radius + i as f32, radius + j as f32))?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-// TODO: Consider including the texture creator in the struct
-//       If not doing so can cause an invalid texture render (when working with multiple canvas)
-struct GeometryRenderer<'tc> {
-    // floats do not implement the Hash trait!!
-    // we store the float as a u32 using to_bits() for hashing purposes
-    texture_cache: HashMap<GeometryShape, Rc<render::Texture<'tc>>>,
-}
-
-impl<'tc> GeometryRenderer<'tc> {
-    fn init() -> GeometryRenderer<'tc> {
-        Self {
-            texture_cache: HashMap::new(),
-        }
-    }
-
-    fn get_texture<T>(
-        &mut self,
-        shape: GeometryShape,
+    fn get_texture<'tc, T>(
+        &self,
         texture_creator: &'tc render::TextureCreator<T>,
-    ) -> Result<Rc<render::Texture<'tc>>, GeometryRenderError> {
+        geometry_cache: &mut GeometryCache<'tc>, // TODO: Consider making it an Option
+    ) -> Result<Rc<render::Texture<'tc>>, CacheableGeometryError> {
         // used pattern matching on Entry::Vacant to avoid clippy's map_entry warning
-        if let hash_map::Entry::Vacant(entry) = self.texture_cache.entry(shape) {
+        let shape = self.geometry_props();
+        if let hash_map::Entry::Vacant(entry) = geometry_cache.texture_cache.entry(shape) {
             let empty_surface =
-                Surface::new(shape.width(), shape.height(), pixels::PixelFormat::RGBA32)
-                    .map_err(GeometryRenderError::SurfaceCreation)?;
+                Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
+                    .map_err(CacheableGeometryError::SurfaceCreation)?;
 
             let mut canvas = empty_surface
                 .into_canvas()
-                .map_err(GeometryRenderError::SurfaceToCanvas)?;
+                .map_err(CacheableGeometryError::SurfaceToCanvas)?;
 
-            shape
-                .draw(&mut canvas)
-                .map_err(GeometryRenderError::CanvasDraw)?;
+            self.render(&mut canvas)
+                .map_err(CacheableGeometryError::CanvasRender)?;
 
             let surface = canvas.into_surface();
 
             let texture = texture_creator
                 .create_texture_from_surface(&surface)
-                .map_err(GeometryRenderError::TextureCreation)?;
+                .map_err(CacheableGeometryError::TextureCreation)?;
 
             entry.insert(Rc::new(texture));
         }
 
-        Ok(Rc::clone(self.texture_cache.get(&shape).unwrap()))
+        Ok(Rc::clone(geometry_cache.texture_cache.get(&shape).unwrap()))
     }
 
-    fn get_positioned_texture<T>(
-        &mut self,
-        shape: GeometryShape,
+    fn get_positioned_texture<'tc, T>(
+        &self,
         texture_creator: &'tc render::TextureCreator<T>,
+        geometry_cache: &mut GeometryCache<'tc>, // TODO: Consider making it an Option
         position: (i32, i32),
-    ) -> Result<PositionedTexture<'tc>, GeometryRenderError> {
-        self.get_texture(shape, texture_creator)?;
-
-        let texture = self.texture_cache.get(&shape).unwrap();
+        position_type: PositionType,
+    ) -> Result<PositionedTexture<'tc>, CacheableGeometryError> {
+        let texture = self.get_texture(texture_creator, geometry_cache)?;
         let query = texture.query();
-        let rect = rect::Rect::new(position.0, position.1, query.width, query.height);
+        let mut rect = rect::Rect::new(0, 0, query.width, query.height);
+
+        match position_type {
+            PositionType::TopLeft => {
+                rect.set_x(position.0);
+                rect.set_y(position.1);
+            }
+            PositionType::Center => {
+                rect.set_x(position.0 - (self.width() as i32) / 2);
+                rect.set_y(position.1 - (self.height() as i32) / 2);
+            }
+        }
 
         Ok(PositionedTexture {
-            texture: Rc::clone(texture),
+            texture: Rc::clone(&texture),
             rect,
         })
+    }
+
+    fn draw_onto<'tc, T: render::RenderTarget, U>(
+        &self,
+        canvas: &mut Canvas<T>,
+        texture_creator: &'tc render::TextureCreator<U>,
+        geometry_cache: &mut GeometryCache<'tc>,
+        position: (i32, i32),
+        position_type: PositionType,
+    ) -> Result<(), CacheableGeometryError> {
+        let positioned_texture =
+            self.get_positioned_texture(texture_creator, geometry_cache, position, position_type)?;
+        positioned_texture
+            .draw_onto(canvas)
+            .map_err(CacheableGeometryError::TextureCopy)?;
+        Ok(())
     }
 }
 
 #[allow(dead_code)]
-enum GeometryRenderError {
+enum CacheableGeometryError {
     SurfaceCreation(sdl3::Error),
     SurfaceToCanvas(sdl3::Error),
-    CanvasDraw(sdl3::Error),
+    CanvasRender(sdl3::Error),
     TextureCreation(render::TextureValueError),
     TextureCopy(sdl3::Error),
+}
+
+struct Circle {
+    radius: f32,
+    color: Color,
+}
+
+impl CacheableGeometry for Circle {
+    fn geometry_props(&self) -> HashableGeometryProps {
+        HashableGeometryProps::Circle {
+            radius: Hashf32::new(self.radius),
+            color: self.color,
+        }
+    }
+
+    fn width(&self) -> u32 {
+        self.radius.ceil() as u32 * 2 // TODO: Debug missing last line & row form texture
+    }
+
+    fn height(&self) -> u32 {
+        self.radius.ceil() as u32 * 2
+    }
+
+    fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+        canvas.set_draw_color(self.color);
+
+        let radius: f32 = self.radius;
+        for i in 0..36 {
+            let theta1: f32 = (i as f32) * 2.0 * std::f32::consts::PI / 36.;
+            let theta2: f32 = ((i + 1) as f32) * 2.0 * std::f32::consts::PI / 36.;
+            let x1: f32 = radius * theta1.cos() + radius;
+            let y1: f32 = radius * theta1.sin() + radius;
+            let x2: f32 = radius * theta2.cos() + radius;
+            let y2: f32 = radius * theta2.sin() + radius;
+            canvas.draw_line((x1, y1), (x2, y2))?;
+        }
+        Ok(())
+    }
+}
+
+struct Disc {
+    radius: f32,
+    color: Color,
+}
+
+impl CacheableGeometry for Disc {
+    fn geometry_props(&self) -> HashableGeometryProps {
+        HashableGeometryProps::Disc {
+            radius: Hashf32::new(self.radius),
+            color: self.color,
+        }
+    }
+
+    fn width(&self) -> u32 {
+        self.radius.ceil() as u32 * 2
+    }
+
+    fn height(&self) -> u32 {
+        self.radius.ceil() as u32 * 2
+    }
+
+    fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+        canvas.set_draw_color(self.color);
+
+        let radius: f32 = self.radius;
+        for i in -(radius as i16)..=(radius as i16) {
+            let y_offset = (radius * radius - (i as f32) * (i as f32)).sqrt() as i16;
+            for j in -y_offset..=y_offset {
+                canvas.draw_point((radius + i as f32, radius + j as f32))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// TODO: Consider including the texture creator in the struct
+//       If not doing so can cause an invalid texture render (when working with multiple canvas)
+struct GeometryCache<'tc> {
+    texture_cache: HashMap<HashableGeometryProps, Rc<render::Texture<'tc>>>,
+}
+
+impl<'tc> GeometryCache<'tc> {
+    fn init() -> GeometryCache<'tc> {
+        Self {
+            texture_cache: HashMap::new(),
+        }
+    }
 }
 
 struct FontRenderer<'ft, 'tc> {
@@ -1108,6 +1156,7 @@ impl<'ft, 'tc> FontRenderer<'ft, 'tc> {
 }
 
 // TODO: Implement multi-color support for the caching system
+// TODO: Delete this function once fonts implement the CacheableGeometry trait
 fn get_positioned_texture<'tc, T>(
     text: &str,
     font_renderer: &mut FontRenderer<'_, 'tc>,
@@ -1292,7 +1341,9 @@ pub fn main() {
             .load_font("assets/Basic-Regular.ttf", 25.)
             .unwrap(),
     );
-    let mut geometry_renderer: GeometryRenderer = GeometryRenderer::init();
+
+    // Initialize the geometry cache system
+    let mut geometry_cache: GeometryCache = GeometryCache::init();
 
     // Render text textures
     let mut hold_space_posed_texture = get_positioned_texture(
@@ -1530,13 +1581,13 @@ pub fn main() {
         }
 
         // Write "PRESS ENTER TO TOGGLE CAMERAS"
-        failed_rendering |= hold_space_posed_texture.render_onto(&mut canvas).is_err();
+        failed_rendering |= hold_space_posed_texture.draw_onto(&mut canvas).is_err();
 
         // Render controller name
-        failed_rendering |= js_name_posed_texture.render_onto(&mut canvas).is_err();
+        failed_rendering |= js_name_posed_texture.draw_onto(&mut canvas).is_err();
 
         // Render seed text
-        failed_rendering |= seed_posed_texture.render_onto(&mut canvas).is_err();
+        failed_rendering |= seed_posed_texture.draw_onto(&mut canvas).is_err();
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -1557,8 +1608,8 @@ pub fn main() {
             joystick_direction,
             acceleration_pressed,
             &mut canvas,
-            &mut geometry_renderer,
             &texture_creator,
+            &mut geometry_cache,
         )
         .is_err();
 
@@ -1581,15 +1632,6 @@ pub fn main() {
             );
         }
 
-        // Compute the average FPS
-        fps_sample.push_back(1.0 / time.elapsed().as_secs_f32());
-        fps_sample.pop_front();
-        let average_fps: f32 = fps_sample.iter().sum::<f32>() / fps_sample.len() as f32;
-        let mut log_fps: bool =
-            REGULAR_LOG_FPS && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
-        let mut log_perf: bool =
-            REGULAR_LOG_PERF && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
-
         // Sleep to control the FPS
         let mut slept: bool = false;
         if !DEBUG_MAX_FPS {
@@ -1600,6 +1642,15 @@ pub fn main() {
                 slept = true;
             }
         }
+
+        // Compute the average FPS
+        fps_sample.push_back(1.0 / time.elapsed().as_secs_f32());
+        fps_sample.pop_front();
+        let average_fps: f32 = fps_sample.iter().sum::<f32>() / fps_sample.len() as f32;
+        let mut log_fps: bool =
+            REGULAR_LOG_FPS && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
+        let mut log_perf: bool =
+            REGULAR_LOG_PERF && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
 
         // If average frame rate drops below 80% of the frame target, log a warning
         if average_fps < 0.8 * GAME_FPS {

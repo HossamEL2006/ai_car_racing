@@ -22,8 +22,22 @@ use std::{
 };
 use svg::{node::element::tag, parser};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 struct Meter(f32);
+
+impl PartialEq for Meter {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for Meter {}
+
+impl Hash for Meter {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
 
 impl ops::Add for Meter {
     type Output = Meter;
@@ -49,7 +63,13 @@ impl ops::Neg for Meter {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+impl Meter {
+    fn as_px_dist(&self, camera: &Camera) -> f32 {
+        self.0 * camera.px_per_meter as f32
+    }
+}
+
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
 struct Coords {
     x: Meter,
     y: Meter,
@@ -92,7 +112,10 @@ impl Coords {
     }
 
     fn as_fpoint(&self, camera: &Camera) -> render::FPoint {
-        let px_coords: Vector = (camera.px_per_meter as f32) * (*self - camera.coords);
+        let px_coords: Vector = Vector {
+            x: Meter((camera.px_per_meter as f32) * (self.x - camera.coords.x).0),
+            y: Meter((camera.px_per_meter as f32) * (self.y - camera.coords.y).0),
+        };
         render::FPoint::new(
             (camera.width / 2) as f32 + px_coords.x.0,
             (camera.height / 2) as f32 - px_coords.y.0,
@@ -147,64 +170,6 @@ impl Vector {
             y: Meter(x * sin_theta + y * cos_theta),
         }
     }
-
-    fn render(
-        &self,
-        base_point: Coords,
-        camera: &Camera,
-        canvas: &mut Canvas<Window>,
-    ) -> Result<(), sdl3::Error> {
-        if self.norm().0 < 0.5 {
-            return Ok(());
-        }
-
-        let start: rect::Point = (base_point).as_point(camera);
-        let end: rect::Point = (base_point + *self).as_point(camera);
-        canvas.draw_line(start, end)?;
-
-        let arrow_tip: rect::Point =
-            (base_point + *self + 0.2 * self.rotated(150.0f32.to_radians())).as_point(camera);
-        canvas.draw_line(end, arrow_tip)?;
-        let arrow_tip2: rect::Point =
-            (base_point + *self + 0.2 * self.rotated(210.0f32.to_radians())).as_point(camera);
-        canvas.draw_line(end, arrow_tip2)?;
-
-        Ok(())
-    }
-
-    fn render_labeled<'tc, T>(
-        &self,
-        base_point: Coords,
-        camera: &Camera,
-        canvas: &mut Canvas<Window>,
-        label: &str,
-        font_renderer: &mut FontRenderer<'_, 'tc>,
-        texture_creator: &'tc render::TextureCreator<T>,
-    ) -> Result<(), VectorRenderLabeledError> {
-        if self.norm().0 < 0.5 {
-            return Ok(());
-        }
-
-        self.render(base_point, camera, canvas)
-            .map_err(VectorRenderLabeledError::ArrowRender)?;
-        let tip_point: rect::Point = (base_point + *self).as_point(camera);
-        let mut label_posed_texture = get_positioned_texture(label, font_renderer, texture_creator)
-            .map_err(VectorRenderLabeledError::LabelTexture)?;
-        label_posed_texture.rect.x = tip_point.x - label_posed_texture.width() / 2;
-        label_posed_texture.rect.y = tip_point.y - label_posed_texture.height() / 2;
-        label_posed_texture
-            .draw_onto(canvas)
-            .map_err(VectorRenderLabeledError::LabelRender)?;
-        Ok(())
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-enum VectorRenderLabeledError {
-    ArrowRender(sdl3::Error),
-    LabelTexture(TextRenderError),
-    LabelRender(sdl3::Error),
 }
 
 impl ops::Add for Vector {
@@ -503,51 +468,53 @@ impl Car {
         &self,
         camera: &Camera,
         canvas: &mut Canvas<Window>,
-        font_renderer: &mut FontRenderer<'_, 'tc>,
         texture_creator: &'tc render::TextureCreator<T>,
-    ) -> Result<(), VectorRenderLabeledError> {
+        texture_cache: &mut TextureCache<'tc>,
+    ) -> Result<(), CacheableGraphicError> {
         // fun fact :
         // Implementing a text caching system made this function around 40 times faster
 
         let debug_scalar: f32 = 0.3;
         let base_point: Coords = self.coords;
         let friction_acc = -self.friction_factor * self.velocity;
-        canvas.set_draw_color(Color::RGB(255, 0, 0));
-        (debug_scalar * self.velocity).render_labeled(
-            base_point,
-            camera,
-            canvas,
-            "v",
-            font_renderer,
-            texture_creator,
-        )?;
-        canvas.set_draw_color(Color::RGB(0, 0, 255));
-        (debug_scalar.powi(2) * self.engine_acc).render_labeled(
-            base_point,
-            camera,
-            canvas,
-            "p",
-            font_renderer,
-            texture_creator,
-        )?;
-        canvas.set_draw_color(Color::RGB(0, 255, 0));
-        (debug_scalar.powi(2) * friction_acc).render_labeled(
-            base_point,
-            camera,
-            canvas,
-            "f",
-            font_renderer,
-            texture_creator,
-        )?;
-        canvas.set_draw_color(Color::RGB(255, 255, 0));
-        (debug_scalar.powi(2) * (self.engine_acc + friction_acc)).render_labeled(
-            base_point,
-            camera,
-            canvas,
-            "a",
-            font_renderer,
-            texture_creator,
-        )?;
+        let gvectors = [
+            GVector::new(
+                &(debug_scalar * self.velocity),
+                camera,
+                Some(Color::RGB(255, 0, 0)),
+                Some("v"),
+            ),
+            GVector::new(
+                &(debug_scalar.powi(2) * self.engine_acc),
+                camera,
+                Some(Color::RGB(0, 0, 255)),
+                Some("p"),
+            ),
+            GVector::new(
+                &(debug_scalar.powi(2) * friction_acc),
+                camera,
+                Some(Color::RGB(0, 255, 0)),
+                Some("f"),
+            ),
+            GVector::new(
+                &(debug_scalar.powi(2) * (self.engine_acc + friction_acc)),
+                camera,
+                Some(Color::RGB(255, 255, 0)),
+                Some("a"),
+            ),
+        ];
+
+        for gvector in &gvectors {
+            gvector.draw_onto(
+                canvas,
+                texture_creator,
+                texture_cache,
+                DrawPosition::RealCoords {
+                    coords: base_point,
+                    camera,
+                },
+            )?;
+        }
         Ok(())
     }
 
@@ -656,8 +623,6 @@ impl BezierPathConfig {
             let mut cyclic_anchors: Vec<Coords> = vec![*anchors.last().unwrap()];
             anchors.push(anchors[0]);
             cyclic_anchors.extend(anchors);
-
-            // Add first anchor to the end to make it circular
 
             for (prev_anchor, anchor, next_anchor) in cyclic_anchors
                 .windows(3)
@@ -885,8 +850,8 @@ fn render_joystick<'tc, T: render::RenderTarget, U>(
     pressed: bool,
     canvas: &mut Canvas<T>,
     texture_creator: &'tc render::TextureCreator<U>,
-    geometry_cache: &mut GeometryCache<'tc>,
-) -> Result<(), CacheableGeometryError> {
+    texture_cache: &mut TextureCache<'tc>,
+) -> Result<(), CacheableGraphicError> {
     let (center_x, center_y) = center_pos;
     Circle {
         radius: JOYSTICK_OUTER_RADIUS,
@@ -895,9 +860,11 @@ fn render_joystick<'tc, T: render::RenderTarget, U>(
     .draw_onto(
         canvas,
         texture_creator,
-        geometry_cache,
-        (center_x as i32, center_y as i32),
-        PositionType::Center,
+        texture_cache,
+        DrawPosition::ScreenCoords {
+            x: center_x as i32,
+            y: center_y as i32,
+        },
     )?;
 
     let pos_x: f32 = center_x as f32 + direction.x.0 * JOYSTICK_MAX_REACH_RADIUS;
@@ -914,19 +881,21 @@ fn render_joystick<'tc, T: render::RenderTarget, U>(
     .draw_onto(
         canvas,
         texture_creator,
-        geometry_cache,
-        (pos_x as i32, pos_y as i32),
-        PositionType::Center,
+        texture_cache,
+        DrawPosition::ScreenCoords {
+            x: pos_x as i32,
+            y: pos_y as i32,
+        },
     )?;
     Ok(())
 }
 
-enum PositionType {
-    TopLeft,
-    Center,
+enum DrawPosition<'cm> {
+    ScreenCoords { x: i32, y: i32 },
+    RealCoords { coords: Coords, camera: &'cm Camera },
 }
 
-// TODO: Consider deleting this struct once everything (including font) implement CacheableGeometry
+// TODO: Consider deleting this struct once everything (including font) implement CacheableGraphic
 struct PositionedTexture<'tc> {
     // 'tc is the lifetime of the texture creator
     texture: Rc<render::Texture<'tc>>,
@@ -956,68 +925,85 @@ impl<'tc> PositionedTexture<'tc> {
     }
 }
 
-#[derive(Clone, Copy, Hash, Eq, PartialEq)]
-enum HashableGeometryProps {
-    Circle { radius: Hashf32, color: Color },
-    Disc { radius: Hashf32, color: Color },
+#[derive(Clone, Hash, Eq, PartialEq)]
+enum HashableGraphicProps {
+    Circle {
+        radius: Hashf32,
+        color: Color,
+    },
+    Disc {
+        radius: Hashf32,
+        color: Color,
+    },
+    Vector {
+        x: Hashf32,
+        y: Hashf32,
+        color: Option<Color>,
+        label: Option<String>,
+    },
 }
 
-trait CacheableGeometry {
-    fn geometry_props(&self) -> HashableGeometryProps;
+// TODO: Make CacheableGraphic generic over HashableGraphicProps
+trait CacheableGraphic {
+    fn hashable_properties(&self) -> HashableGraphicProps;
     fn width(&self) -> u32;
     fn height(&self) -> u32;
+    fn anchor(&self) -> (u32, u32);
+
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error>;
 
     fn get_texture<'tc, T>(
         &self,
         texture_creator: &'tc render::TextureCreator<T>,
-        geometry_cache: &mut GeometryCache<'tc>, // TODO: Consider making it an Option
-    ) -> Result<Rc<render::Texture<'tc>>, CacheableGeometryError> {
+        texture_cache: &mut TextureCache<'tc>, // TODO: Consider making it an Option
+    ) -> Result<Rc<render::Texture<'tc>>, CacheableGraphicError> {
         // used pattern matching on Entry::Vacant to avoid clippy's map_entry warning
-        let shape = self.geometry_props();
-        if let hash_map::Entry::Vacant(entry) = geometry_cache.texture_cache.entry(shape) {
+        let shape = self.hashable_properties();
+        if let hash_map::Entry::Vacant(entry) = texture_cache.texture_cache.entry(shape.clone()) {
             let empty_surface =
                 Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
-                    .map_err(CacheableGeometryError::SurfaceCreation)?;
+                    .map_err(CacheableGraphicError::SurfaceCreation)?;
 
             let mut canvas = empty_surface
                 .into_canvas()
-                .map_err(CacheableGeometryError::SurfaceToCanvas)?;
+                .map_err(CacheableGraphicError::SurfaceToCanvas)?;
 
             self.render(&mut canvas)
-                .map_err(CacheableGeometryError::CanvasRender)?;
+                .map_err(CacheableGraphicError::CanvasRender)?;
 
             let surface = canvas.into_surface();
 
             let texture = texture_creator
                 .create_texture_from_surface(&surface)
-                .map_err(CacheableGeometryError::TextureCreation)?;
+                .map_err(CacheableGraphicError::TextureCreation)?;
 
             entry.insert(Rc::new(texture));
         }
 
-        Ok(Rc::clone(geometry_cache.texture_cache.get(&shape).unwrap()))
+        Ok(Rc::clone(texture_cache.texture_cache.get(&shape).unwrap()))
     }
 
     fn get_positioned_texture<'tc, T>(
         &self,
         texture_creator: &'tc render::TextureCreator<T>,
-        geometry_cache: &mut GeometryCache<'tc>, // TODO: Consider making it an Option
-        position: (i32, i32),
-        position_type: PositionType,
-    ) -> Result<PositionedTexture<'tc>, CacheableGeometryError> {
-        let texture = self.get_texture(texture_creator, geometry_cache)?;
+        texture_cache: &mut TextureCache<'tc>, // TODO: Consider making it an Option
+        position: DrawPosition,
+    ) -> Result<PositionedTexture<'tc>, CacheableGraphicError> {
+        let texture = self.get_texture(texture_creator, texture_cache)?;
         let query = texture.query();
         let mut rect = rect::Rect::new(0, 0, query.width, query.height);
 
-        match position_type {
-            PositionType::TopLeft => {
-                rect.set_x(position.0);
-                rect.set_y(position.1);
+        let (anchor_x, anchor_y) = self.anchor();
+        match position {
+            DrawPosition::ScreenCoords { x, y } => {
+                rect.set_x(x - anchor_x as i32);
+                rect.set_y(y - anchor_y as i32);
             }
-            PositionType::Center => {
-                rect.set_x(position.0 - (self.width() as i32) / 2);
-                rect.set_y(position.1 - (self.height() as i32) / 2);
+            DrawPosition::RealCoords { coords, camera } => {
+                let screen_x = coords.as_point(camera).x();
+                let screen_y = coords.as_point(camera).y();
+                rect.set_x(screen_x - anchor_x as i32);
+                rect.set_y(screen_y - anchor_y as i32);
             }
         }
 
@@ -1031,21 +1017,24 @@ trait CacheableGeometry {
         &self,
         canvas: &mut Canvas<T>,
         texture_creator: &'tc render::TextureCreator<U>,
-        geometry_cache: &mut GeometryCache<'tc>,
-        position: (i32, i32),
-        position_type: PositionType,
-    ) -> Result<(), CacheableGeometryError> {
+        texture_cache: &mut TextureCache<'tc>,
+        position: DrawPosition,
+    ) -> Result<(), CacheableGraphicError> {
+        if self.width() == 0 || self.height() == 0 {
+            return Ok(());
+        }
         let positioned_texture =
-            self.get_positioned_texture(texture_creator, geometry_cache, position, position_type)?;
+            self.get_positioned_texture(texture_creator, texture_cache, position)?;
         positioned_texture
             .draw_onto(canvas)
-            .map_err(CacheableGeometryError::TextureCopy)?;
+            .map_err(CacheableGraphicError::TextureCopy)?;
         Ok(())
     }
 }
 
 #[allow(dead_code)]
-enum CacheableGeometryError {
+#[derive(Debug)]
+enum CacheableGraphicError {
     SurfaceCreation(sdl3::Error),
     SurfaceToCanvas(sdl3::Error),
     CanvasRender(sdl3::Error),
@@ -1058,9 +1047,9 @@ struct Circle {
     color: Color,
 }
 
-impl CacheableGeometry for Circle {
-    fn geometry_props(&self) -> HashableGeometryProps {
-        HashableGeometryProps::Circle {
+impl CacheableGraphic for Circle {
+    fn hashable_properties(&self) -> HashableGraphicProps {
+        HashableGraphicProps::Circle {
             radius: Hashf32::new(self.radius),
             color: self.color,
         }
@@ -1072,6 +1061,10 @@ impl CacheableGeometry for Circle {
 
     fn height(&self) -> u32 {
         self.radius.ceil() as u32 * 2
+    }
+
+    fn anchor(&self) -> (u32, u32) {
+        (self.radius.ceil() as u32, self.radius.ceil() as u32)
     }
 
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
@@ -1096,9 +1089,9 @@ struct Disc {
     color: Color,
 }
 
-impl CacheableGeometry for Disc {
-    fn geometry_props(&self) -> HashableGeometryProps {
-        HashableGeometryProps::Disc {
+impl CacheableGraphic for Disc {
+    fn hashable_properties(&self) -> HashableGraphicProps {
+        HashableGraphicProps::Disc {
             radius: Hashf32::new(self.radius),
             color: self.color,
         }
@@ -1110,6 +1103,10 @@ impl CacheableGeometry for Disc {
 
     fn height(&self) -> u32 {
         self.radius.ceil() as u32 * 2
+    }
+
+    fn anchor(&self) -> (u32, u32) {
+        (self.radius.ceil() as u32, self.radius.ceil() as u32)
     }
 
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
@@ -1126,14 +1123,123 @@ impl CacheableGeometry for Disc {
     }
 }
 
-// TODO: Consider including the texture creator in the struct
-//       If not doing so can cause an invalid texture render (when working with multiple canvas)
-struct GeometryCache<'tc> {
-    texture_cache: HashMap<HashableGeometryProps, Rc<render::Texture<'tc>>>,
+struct GVector {
+    x: f32,
+    y: f32,
+    color: Option<Color>,
+    label: Option<String>,
 }
 
-impl<'tc> GeometryCache<'tc> {
-    fn init() -> GeometryCache<'tc> {
+impl GVector {
+    fn new(vec: &Vector, camera: &Camera, color: Option<Color>, label: Option<&str>) -> Self {
+        Self {
+            x: vec.x.as_px_dist(camera).round(),
+            y: -vec.y.as_px_dist(camera).round(),
+            color,
+            label: label.map(|s| s.to_string()),
+        }
+    }
+
+    fn norm(&self) -> f32 {
+        (self.x.powi(2) + self.y.powi(2)).sqrt()
+    }
+}
+
+impl CacheableGraphic for GVector {
+    fn hashable_properties(&self) -> HashableGraphicProps {
+        HashableGraphicProps::Vector {
+            x: Hashf32::new(self.x),
+            y: Hashf32::new(self.y),
+            color: self.color,
+            label: self.label.clone(),
+            // TODO: find a way to seperate the label and the vector graphic itself to avoid hashing
+            //       a vector two times when only the label changes
+            // A suggestion is to seperate between elementary and non-elementary graphics
+        }
+    }
+
+    fn width(&self) -> u32 {
+        (2.0 * self.norm().ceil()) as u32
+    }
+
+    fn height(&self) -> u32 {
+        (2.0 * self.norm().ceil()) as u32
+    }
+
+    fn anchor(&self) -> (u32, u32) {
+        (self.width() / 2, self.height() / 2)
+    }
+
+    fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+        let (start_x, start_y) = self.anchor();
+        let end_x = (start_x as i32 + self.x.ceil() as i32) as u32;
+        let end_y = (start_y as i32 + self.y.ceil() as i32) as u32;
+
+        let start_point = rect::Point::new(start_x as i32, start_y as i32);
+        let end_point = rect::Point::new(end_x as i32, end_y as i32);
+
+        if let Some(color) = self.color {
+            canvas.set_draw_color(color);
+        }
+
+        canvas.draw_line(start_point, end_point)?;
+
+        // TODO: Simplify this spaghetti by implementing a vector type with rotation and scaling
+        //       operations, this struct should be different from the IRL Vector previously
+        //       implemented.
+        let tip_size = self.x.abs().max(self.y.abs()) * 0.25;
+
+        let theta = std::f32::consts::PI / 6.0; // 30 degrees for the arrow tip
+        let vec: (i32, i32) = (start_x as i32 - end_x as i32, start_y as i32 - end_y as i32);
+
+        let vec_length = (vec.0.pow(2) + vec.1.pow(2)) as f32;
+        let vec_length = vec_length.sqrt();
+
+        if vec_length < 1e-6 {
+            return Ok(());
+        }
+
+        let vec_rotated1 = (
+            vec.0 as f32 * theta.cos() - vec.1 as f32 * theta.sin(),
+            vec.0 as f32 * theta.sin() + vec.1 as f32 * theta.cos(),
+        );
+        let vec_rotated2 = (
+            vec.0 as f32 * theta.cos() + vec.1 as f32 * theta.sin(),
+            -(vec.0 as f32) * theta.sin() + vec.1 as f32 * theta.cos(),
+        );
+
+        let vec_rotated1 = (
+            vec_rotated1.0 * tip_size / vec_length,
+            vec_rotated1.1 * tip_size / vec_length,
+        );
+        let vec_rotated2 = (
+            vec_rotated2.0 * tip_size / vec_length,
+            vec_rotated2.1 * tip_size / vec_length,
+        );
+
+        let tip_point1 = rect::Point::new(
+            (end_x as f32 + vec_rotated1.0) as i32,
+            (end_y as f32 + vec_rotated1.1) as i32,
+        );
+        let tip_point2 = rect::Point::new(
+            (end_x as f32 + vec_rotated2.0) as i32,
+            (end_y as f32 + vec_rotated2.1) as i32,
+        );
+
+        canvas.draw_line(end_point, tip_point1)?;
+        canvas.draw_line(end_point, tip_point2)?;
+        Ok(())
+    }
+}
+
+// TODO: Consider including the texture creator in the struct...
+//       ...if not doing so can cause an invalid texture render (when working with multiple canvas)
+struct TextureCache<'tc> {
+    texture_cache: HashMap<HashableGraphicProps, Rc<render::Texture<'tc>>>,
+}
+
+impl<'tc> TextureCache<'tc> {
+    fn init() -> TextureCache<'tc> {
         Self {
             texture_cache: HashMap::new(),
         }
@@ -1155,8 +1261,8 @@ impl<'ft, 'tc> FontRenderer<'ft, 'tc> {
     }
 }
 
-// TODO: Implement multi-color support for the caching system
-// TODO: Delete this function once fonts implement the CacheableGeometry trait
+// TODO: Make this a cacheable graphic, don't forget to add the color as a property.
+// TODO: Delete this function once fonts implement the CacheableGraphic trait
 fn get_positioned_texture<'tc, T>(
     text: &str,
     font_renderer: &mut FontRenderer<'_, 'tc>,
@@ -1188,8 +1294,8 @@ fn get_positioned_texture<'tc, T>(
     })
 }
 
-#[derive(Debug)]
 #[allow(dead_code)]
+#[derive(Debug)]
 enum TextRenderError {
     FontRender(ttf::FontError),
     TextureCreation(render::TextureValueError),
@@ -1284,7 +1390,7 @@ pub fn main() {
     let outer_border_loop = outer_border
         .iter()
         .chain(iter::once(outer_border.first().unwrap()));
-    let inside_area: Polygon = Polygon::from_vertices(&inner_border);
+    let circuit_enclosed_area: Polygon = Polygon::from_vertices(&inner_border);
     let circuit_polygon: Polygon = Polygon::from_vertices(
         inner_border_loop
             .chain(outer_border_loop.rev())
@@ -1342,8 +1448,8 @@ pub fn main() {
             .unwrap(),
     );
 
-    // Initialize the geometry cache system
-    let mut geometry_cache: GeometryCache = GeometryCache::init();
+    // Initialize the texture caching system
+    let mut texture_cache: TextureCache = TextureCache::init();
 
     // Render text textures
     let mut hold_space_posed_texture = get_positioned_texture(
@@ -1528,8 +1634,10 @@ pub fn main() {
 
         // Fill all the inside of the circuit
         canvas.set_draw_color(Color::RGB(10, 70, 10));
-        failed_rendering |= inside_area
+        // log the error if rendering the inside area fails
+        failed_rendering |= circuit_enclosed_area
             .render_filled(current_camera, &mut canvas)
+            .map_err(|e| eprintln!("Failed to render the inside area: {:?}", e))
             .is_err();
 
         if REGULAR_LOG_PERF {
@@ -1539,6 +1647,7 @@ pub fn main() {
         canvas.set_draw_color(Color::RGB(80, 80, 80));
         failed_rendering |= circuit_polygon
             .render_filled(current_camera, &mut canvas)
+            .map_err(|e| eprintln!("Failed to render the circuit polygon: {:?}", e))
             .is_err();
 
         if REGULAR_LOG_PERF {
@@ -1546,9 +1655,13 @@ pub fn main() {
         }
 
         if CIRCUIT_DEBUG {
-            failed_rendering |= path.render(current_camera, &mut canvas).is_err();
+            failed_rendering |= path
+                .render(current_camera, &mut canvas)
+                .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
+                .is_err();
             failed_rendering |= path
                 .render_debug_anchors(current_camera, &mut canvas)
+                .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
                 .is_err();
         }
 
@@ -1558,7 +1671,10 @@ pub fn main() {
 
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));
-        failed_rendering |= car.pretty_render(current_camera, &mut canvas).is_err();
+        failed_rendering |= car
+            .pretty_render(current_camera, &mut canvas)
+            .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
+            .is_err();
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -1570,9 +1686,10 @@ pub fn main() {
                 .render_debug_vectors(
                     current_camera,
                     &mut canvas,
-                    &mut font_renderer,
                     &texture_creator,
+                    &mut texture_cache,
                 )
+                .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
                 .is_err();
         }
 
@@ -1581,13 +1698,22 @@ pub fn main() {
         }
 
         // Write "PRESS ENTER TO TOGGLE CAMERAS"
-        failed_rendering |= hold_space_posed_texture.draw_onto(&mut canvas).is_err();
+        failed_rendering |= hold_space_posed_texture
+            .draw_onto(&mut canvas)
+            .map_err(|e| eprintln!("Failed to render the hold space text: {:?}", e))
+            .is_err();
 
         // Render controller name
-        failed_rendering |= js_name_posed_texture.draw_onto(&mut canvas).is_err();
+        failed_rendering |= js_name_posed_texture
+            .draw_onto(&mut canvas)
+            .map_err(|e| eprintln!("Failed to render the joystick name text: {:?}", e))
+            .is_err();
 
         // Render seed text
-        failed_rendering |= seed_posed_texture.draw_onto(&mut canvas).is_err();
+        failed_rendering |= seed_posed_texture
+            .draw_onto(&mut canvas)
+            .map_err(|e| eprintln!("Failed to render the seed text: {:?}", e))
+            .is_err();
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -1599,18 +1725,19 @@ pub fn main() {
         let (x2, y2) = (CAMERA_WIDTH, CAMERA_HEIGHT);
         failed_rendering |= canvas
             .draw_line((x1 as f32, y1 as f32), (x2 as f32, y2 as f32))
+            .map_err(|e| eprintln!("Failed to draw the separating line: {:?}", e))
             .is_err();
 
         // Render the joystick
-        // TODO: Optimize rendering with a joystick texture
         failed_rendering |= render_joystick(
             JOYSTICK_POSITION,
             joystick_direction,
             acceleration_pressed,
             &mut canvas,
             &texture_creator,
-            &mut geometry_cache,
+            &mut texture_cache,
         )
+        .map_err(|e| eprintln!("Failed to render the joystick: {:?}", e))
         .is_err();
 
         if REGULAR_LOG_PERF {
@@ -1704,5 +1831,7 @@ pub fn main() {
         }
 
         game_tick_counter += 1;
+
+        // println!("{}", texture_cache.texture_cache.len());
     }
 }

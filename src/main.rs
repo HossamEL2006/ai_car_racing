@@ -216,43 +216,28 @@ struct Camera {
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct Polygon {
     vertices: Vec<Coords>,
-    color: Option<Color>,
 }
 
 impl Polygon {
-    fn from_vertices(vertices: &[Coords]) -> Self {
+    fn new(vertices: &[Coords]) -> Self {
         Self {
             vertices: vertices.to_vec(),
-            color: None,
+            // color: None,
         }
     }
 
-    fn set_color(&mut self, color: Color) {
-        self.color = Some(color);
+    fn width(&self) -> Meter {
+        Meter(
+            self.vertices.iter().map(|v| v.x.0).fold(f32::MIN, f32::max)
+                - self.vertices.iter().map(|v| v.x.0).fold(f32::MAX, f32::min),
+        )
     }
 
-    fn width(&self) -> f32 {
-        self.vertices.iter().map(|v| v.x.0).fold(f32::MIN, f32::max)
-            - self.vertices.iter().map(|v| v.x.0).fold(f32::MAX, f32::min)
-    }
-
-    fn height(&self) -> f32 {
-        self.vertices.iter().map(|v| v.y.0).fold(f32::MIN, f32::max)
-            - self.vertices.iter().map(|v| v.y.0).fold(f32::MAX, f32::min)
-    }
-
-    fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
-        // TODO: Remove this function once cached rendering is fully implemented for polygons
-        Ok(())
-    }
-
-    fn render_filled(
-        &self,
-        camera: &Camera,
-        canvas: &mut Canvas<Window>,
-    ) -> Result<(), sdl3::Error> {
-        // TODO: Remove this function once cached rendering is fully implemented for polygons
-        Ok(())
+    fn height(&self) -> Meter {
+        Meter(
+            self.vertices.iter().map(|v| v.y.0).fold(f32::MIN, f32::max)
+                - self.vertices.iter().map(|v| v.y.0).fold(f32::MAX, f32::min),
+        )
     }
 
     fn contains(&self, point: Coords) -> bool {
@@ -282,7 +267,7 @@ struct Car {
     engine_acc: Vector,
     velocity: Vector,
     friction_factor: f32,
-    car_polys: Vec<Polygon>,
+    car_polys: Vec<(Polygon, Color)>,
 }
 
 impl Car {
@@ -310,14 +295,14 @@ impl Car {
     }
 
     fn as_rect_polygon(&self) -> Polygon {
-        Polygon::from_vertices(self.corner_coords().as_slice())
+        Polygon::new(self.corner_coords().as_slice())
     }
 
-    fn load_svg(&self) -> Vec<Polygon> {
+    fn load_svg(&self) -> Vec<(Polygon, Color)> {
         let svg_path: &str = "assets/f1_car.svg";
         println!("Loading F1 car SVG from {}", svg_path);
 
-        let mut polygons: Vec<Polygon> = Vec::new();
+        let mut polygons: Vec<(Polygon, Color)> = Vec::new();
 
         let mut content = String::new();
         let svg_iterator = svg::open(svg_path, &mut content).unwrap();
@@ -329,7 +314,7 @@ impl Car {
                     .get("fill")
                     .map(|s| parse_color(s).unwrap_or(Color::BLACK))
                     .unwrap_or(Color::BLACK);
-                let mut polygon: Polygon = Polygon::from_vertices(
+                let polygon: Polygon = Polygon::new(
                     &points
                         .split_whitespace()
                         .map(|pair| {
@@ -346,24 +331,37 @@ impl Car {
                         })
                         .collect::<Vec<Coords>>(),
                 );
-                polygon.set_color(color);
-                polygons.push(polygon);
+                polygons.push((polygon, color));
             }
         }
 
         polygons
     }
 
-    fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
-        self.as_rect_polygon().render(camera, canvas)
+    fn render<'tc, T: render::RenderTarget>(
+        &self,
+        camera: &Camera,
+        canvas: &mut Canvas<T>,
+        texture_cache: &mut TextureCache<'tc>,
+        texture_creator: &'tc render::TextureCreator<T>,
+    ) -> Result<(), CacheableGraphicError> {
+        let polygon = self.as_rect_polygon();
+        GPolygon::new(&polygon, Color::RGB(255, 0, 0), false, camera).draw_onto(
+            canvas,
+            texture_creator,
+            texture_cache,
+            DrawPosition::RealCoords { camera },
+        )
     }
 
-    fn pretty_render(
+    fn pretty_render<'tc, T>(
         &self,
         camera: &Camera,
         canvas: &mut Canvas<Window>,
-    ) -> Result<(), sdl3::Error> {
-        for mut polygon in self.car_polys.clone() {
+        texture_creator: &'tc render::TextureCreator<T>,
+        texture_cache: &mut TextureCache<'tc>,
+    ) -> Result<(), CacheableGraphicError> {
+        for (mut polygon, color) in self.car_polys.clone() {
             for vertex in &mut polygon.vertices {
                 // rotate around origin to match car's direction vector
                 // this is incorrect wuz direction is a vector : let angle = self.direction.0;
@@ -378,7 +376,12 @@ impl Car {
                 };
                 *vertex = self.coords + (*vertex - Coords::init(0., 0.));
             }
-            polygon.render_filled(camera, canvas)?;
+            GPolygon::new(&polygon, color, true, camera).draw_onto(
+                canvas,
+                texture_creator,
+                texture_cache,
+                DrawPosition::RealCoords { camera },
+            )?;
         }
         Ok(())
     }
@@ -399,24 +402,28 @@ impl Car {
         let gvectors = [
             GVector::new(
                 &(debug_scalar * self.velocity),
+                base_point,
                 camera,
                 Some(Color::RGB(255, 0, 0)),
                 Some("v"),
             ),
             GVector::new(
                 &(debug_scalar.powi(2) * self.engine_acc),
+                base_point,
                 camera,
                 Some(Color::RGB(0, 0, 255)),
                 Some("p"),
             ),
             GVector::new(
                 &(debug_scalar.powi(2) * friction_acc),
+                base_point,
                 camera,
                 Some(Color::RGB(0, 255, 0)),
                 Some("f"),
             ),
             GVector::new(
                 &(debug_scalar.powi(2) * (self.engine_acc + friction_acc)),
+                base_point,
                 camera,
                 Some(Color::RGB(255, 255, 0)),
                 Some("a"),
@@ -428,10 +435,7 @@ impl Car {
                 canvas,
                 texture_creator,
                 texture_cache,
-                DrawPosition::RealCoords {
-                    coords: base_point,
-                    camera,
-                },
+                DrawPosition::RealCoords { camera },
             )?;
         }
         Ok(())
@@ -655,8 +659,25 @@ impl BezierPathConfig {
 }
 
 impl BezierPath {
-    fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
-        Polygon::from_vertices(&self.coords).render(camera, canvas)
+    fn render<'tc, T>(
+        &self,
+        camera: &Camera,
+        canvas: &mut Canvas<Window>,
+        texture_creator: &'tc render::TextureCreator<T>,
+        texture_cache: &mut TextureCache<'tc>,
+    ) -> Result<(), CacheableGraphicError> {
+        GPolygon::new(
+            &Polygon::new(&self.coords),
+            Color::RGB(255, 255, 255),
+            true,
+            camera,
+        )
+        .draw_onto(
+            canvas,
+            texture_creator,
+            texture_cache,
+            DrawPosition::RealCoords { camera },
+        )
     }
 
     fn render_debug_anchors(
@@ -811,7 +832,7 @@ fn render_joystick<'tc, T: render::RenderTarget, U>(
 
 enum DrawPosition<'cm> {
     ScreenCoords { x: i32, y: i32 },
-    RealCoords { coords: Coords, camera: &'cm Camera },
+    RealCoords { camera: &'cm Camera },
 }
 
 // TODO: Consider deleting this struct once everything (including font) implement CacheableGraphic
@@ -874,7 +895,11 @@ trait CacheableGraphic {
     fn hashable_properties(&self) -> HashableGraphicProps;
     fn width(&self) -> u32;
     fn height(&self) -> u32;
-    fn anchor(&self) -> (i32, i32);
+    fn pixel_anchor(&self) -> (i32, i32);
+    fn world_anchor(&self) -> Option<Coords>;
+    // only implement for graphics meant to be positioned base on world coordinates and camera
+    // TODO: Leverage Rust's type system to enforce that world_anchor is only implemented for
+    //       those graphics
 
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error>;
 
@@ -919,15 +944,22 @@ trait CacheableGraphic {
         let query = texture.query();
         let mut rect = rect::Rect::new(0, 0, query.width, query.height);
 
-        let (anchor_x, anchor_y) = self.anchor();
+        let (anchor_x, anchor_y) = self.pixel_anchor();
         match position {
             DrawPosition::ScreenCoords { x, y } => {
                 rect.set_x(x - anchor_x);
                 rect.set_y(y - anchor_y);
             }
-            DrawPosition::RealCoords { coords, camera } => {
-                let screen_x = coords.as_point(camera).x();
-                let screen_y = coords.as_point(camera).y();
+            DrawPosition::RealCoords { camera } => {
+                // TODO : Leverage Rust types to avoid the panic completely
+                let fpoint_of_world_anchor: rect::Point = self
+                    .world_anchor()
+                    .unwrap_or_else(|| {
+                        panic!("A world anchor was expected for a non-world-base graphic")
+                    })
+                    .as_point(camera);
+                let screen_x: i32 = fpoint_of_world_anchor.x();
+                let screen_y: i32 = fpoint_of_world_anchor.y();
                 rect.set_x(screen_x - anchor_x);
                 rect.set_y(screen_y - anchor_y);
             }
@@ -989,8 +1021,12 @@ impl CacheableGraphic for Circle {
         self.radius.ceil() as u32 * 2
     }
 
-    fn anchor(&self) -> (i32, i32) {
+    fn pixel_anchor(&self) -> (i32, i32) {
         (self.radius.ceil() as i32, self.radius.ceil() as i32)
+    }
+
+    fn world_anchor(&self) -> Option<Coords> {
+        None
     }
 
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
@@ -1031,8 +1067,12 @@ impl CacheableGraphic for Disc {
         self.radius.ceil() as u32 * 2
     }
 
-    fn anchor(&self) -> (i32, i32) {
+    fn pixel_anchor(&self) -> (i32, i32) {
         (self.radius.ceil() as i32, self.radius.ceil() as i32)
+    }
+
+    fn world_anchor(&self) -> Option<Coords> {
+        None
     }
 
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
@@ -1052,15 +1092,23 @@ impl CacheableGraphic for Disc {
 struct GVector {
     x: f32,
     y: f32,
+    base_point: Coords,
     color: Option<Color>,
     label: Option<String>,
 }
 
 impl GVector {
-    fn new(vec: &Vector, camera: &Camera, color: Option<Color>, label: Option<&str>) -> Self {
+    fn new(
+        vec: &Vector,
+        base_point: Coords,
+        camera: &Camera,
+        color: Option<Color>,
+        label: Option<&str>,
+    ) -> Self {
         Self {
             x: vec.x.as_px_dist(camera).round(),
             y: -vec.y.as_px_dist(camera).round(),
+            base_point,
             color,
             label: label.map(|s| s.to_string()),
         }
@@ -1092,12 +1140,16 @@ impl CacheableGraphic for GVector {
         (2.0 * self.norm().ceil()) as u32
     }
 
-    fn anchor(&self) -> (i32, i32) {
+    fn pixel_anchor(&self) -> (i32, i32) {
         (self.width() as i32 / 2, self.height() as i32 / 2)
     }
 
+    fn world_anchor(&self) -> Option<Coords> {
+        Some(self.base_point)
+    }
+
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
-        let (start_x, start_y) = self.anchor();
+        let (start_x, start_y) = (self.width() as i32 / 2, self.height() as i32 / 2);
         let end_x = start_x + self.x.ceil() as i32;
         let end_y = start_y + self.y.ceil() as i32;
 
@@ -1269,10 +1321,14 @@ impl CacheableGraphic for GPolygon {
         (max - min) as u32
     }
 
-    fn anchor(&self) -> (i32, i32) {
+    fn pixel_anchor(&self) -> (i32, i32) {
         let anchor_x = self.anchor.x;
         let anchor_y = self.anchor.y;
         (anchor_x, anchor_y)
+    }
+
+    fn world_anchor(&self) -> Option<Coords> {
+        Some(Coords::init(0., 0.))
     }
 
     fn render<T: render::RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
@@ -1529,8 +1585,8 @@ pub fn main() {
     let outer_border_loop = outer_border
         .iter()
         .chain(iter::once(outer_border.first().unwrap()));
-    let circuit_enclosed_area: Polygon = Polygon::from_vertices(&inner_border);
-    let circuit_polygon: Polygon = Polygon::from_vertices(
+    let circuit_enclosed_area: Polygon = Polygon::new(&inner_border);
+    let circuit_polygon: Polygon = Polygon::new(
         inner_border_loop
             .chain(outer_border_loop.rev())
             .copied()
@@ -1778,7 +1834,6 @@ pub fn main() {
             &texture_creator,
             &mut texture_cache,
             DrawPosition::RealCoords {
-                coords: Coords::init(0., 0.),
                 camera: current_camera,
             },
         )
@@ -1800,7 +1855,6 @@ pub fn main() {
             &texture_creator,
             &mut texture_cache,
             DrawPosition::RealCoords {
-                coords: Coords::init(0., 0.),
                 camera: current_camera,
             },
         )
@@ -1813,7 +1867,12 @@ pub fn main() {
 
         if CIRCUIT_DEBUG {
             failed_rendering |= path
-                .render(current_camera, &mut canvas)
+                .render(
+                    current_camera,
+                    &mut canvas,
+                    &texture_creator,
+                    &mut texture_cache,
+                )
                 .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
                 .is_err();
             failed_rendering |= path
@@ -1829,7 +1888,12 @@ pub fn main() {
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));
         failed_rendering |= car
-            .pretty_render(current_camera, &mut canvas)
+            .pretty_render(
+                current_camera,
+                &mut canvas,
+                &texture_creator,
+                &mut texture_cache,
+            )
             .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
             .is_err();
 

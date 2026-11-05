@@ -342,7 +342,7 @@ impl Car {
         &self,
         camera: &Camera,
         canvas: &mut Canvas<T>,
-        texture_cache: &mut TextureCache<'tc>,
+        texture_cache: &mut Option<TextureCache<'tc>>,
         texture_creator: &'tc render::TextureCreator<T>,
     ) -> Result<(), CacheableGraphicError> {
         let polygon = self.as_rect_polygon();
@@ -359,8 +359,11 @@ impl Car {
         camera: &Camera,
         canvas: &mut Canvas<Window>,
         texture_creator: &'tc render::TextureCreator<T>,
-        texture_cache: &mut TextureCache<'tc>,
+        texture_cache: &mut Option<TextureCache<'tc>>,
     ) -> Result<(), CacheableGraphicError> {
+        // TODO: Implement CacheableGraphic for car with flexible hash values to allow fast
+        //       rendering without memory bloat.
+
         for (mut polygon, color) in self.car_polys.clone() {
             for vertex in &mut polygon.vertices {
                 // rotate around origin to match car's direction vector
@@ -391,7 +394,7 @@ impl Car {
         camera: &Camera,
         canvas: &mut Canvas<Window>,
         texture_creator: &'tc render::TextureCreator<T>,
-        texture_cache: &mut TextureCache<'tc>,
+        texture_cache: &mut Option<TextureCache<'tc>>,
     ) -> Result<(), CacheableGraphicError> {
         // fun fact :
         // Implementing a text caching system made this function around 40 times faster
@@ -664,7 +667,7 @@ impl BezierPath {
         camera: &Camera,
         canvas: &mut Canvas<Window>,
         texture_creator: &'tc render::TextureCreator<T>,
-        texture_cache: &mut TextureCache<'tc>,
+        texture_cache: &mut Option<TextureCache<'tc>>,
     ) -> Result<(), CacheableGraphicError> {
         GPolygon::new(
             &Polygon::new(&self.coords),
@@ -790,7 +793,7 @@ fn render_joystick<'tc, T: render::RenderTarget, U>(
     pressed: bool,
     canvas: &mut Canvas<T>,
     texture_creator: &'tc render::TextureCreator<U>,
-    texture_cache: &mut TextureCache<'tc>,
+    texture_cache: &mut Option<TextureCache<'tc>>,
 ) -> Result<(), CacheableGraphicError> {
     let (center_x, center_y) = center_pos;
     Circle {
@@ -906,38 +909,49 @@ trait CacheableGraphic {
     fn get_texture<'tc, T>(
         &self,
         texture_creator: &'tc render::TextureCreator<T>,
-        texture_cache: &mut TextureCache<'tc>, // TODO: Consider making it an Option
+        texture_cache: &mut Option<TextureCache<'tc>>,
     ) -> Result<Rc<render::Texture<'tc>>, CacheableGraphicError> {
         // used pattern matching on Entry::Vacant to avoid clippy's map_entry warning
         let shape = self.hashable_properties();
-        if let hash_map::Entry::Vacant(entry) = texture_cache.texture_cache.entry(shape.clone()) {
-            let empty_surface =
-                Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
-                    .map_err(CacheableGraphicError::SurfaceCreation)?;
 
-            let mut canvas = empty_surface
-                .into_canvas()
-                .map_err(CacheableGraphicError::SurfaceToCanvas)?;
+        match texture_cache
+            .as_mut()
+            .map(|tc| tc.texture_cache.entry(shape))
+        {
+            Some(hash_map::Entry::Occupied(entry)) => return Ok(Rc::clone(entry.get())),
+            other => {
+                let empty_surface =
+                    Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
+                        .map_err(CacheableGraphicError::SurfaceCreation)?;
 
-            self.render(&mut canvas)
-                .map_err(CacheableGraphicError::CanvasRender)?;
+                let mut canvas = empty_surface
+                    .into_canvas()
+                    .map_err(CacheableGraphicError::SurfaceToCanvas)?;
 
-            let surface = canvas.into_surface();
+                self.render(&mut canvas)
+                    .map_err(CacheableGraphicError::CanvasRender)?;
 
-            let texture = texture_creator
-                .create_texture_from_surface(&surface)
-                .map_err(CacheableGraphicError::TextureCreation)?;
+                let surface = canvas.into_surface();
 
-            entry.insert(Rc::new(texture));
+                let texture = texture_creator
+                    .create_texture_from_surface(&surface)
+                    .map_err(CacheableGraphicError::TextureCreation)?;
+
+                if let Some(hash_map::Entry::Vacant(entry)) = other {
+                    let rc_texture = Rc::new(texture);
+                    entry.insert(Rc::clone(&rc_texture));
+                    return Ok(rc_texture);
+                }
+
+                return Ok(Rc::new(texture));
+            }
         }
-
-        Ok(Rc::clone(texture_cache.texture_cache.get(&shape).unwrap()))
     }
 
     fn get_positioned_texture<'tc, T>(
         &self,
         texture_creator: &'tc render::TextureCreator<T>,
-        texture_cache: &mut TextureCache<'tc>, // TODO: Consider making it an Option
+        texture_cache: &mut Option<TextureCache<'tc>>,
         position: DrawPosition,
     ) -> Result<PositionedTexture<'tc>, CacheableGraphicError> {
         let texture = self.get_texture(texture_creator, texture_cache)?;
@@ -975,7 +989,7 @@ trait CacheableGraphic {
         &self,
         canvas: &mut Canvas<T>,
         texture_creator: &'tc render::TextureCreator<U>,
-        texture_cache: &mut TextureCache<'tc>,
+        texture_cache: &mut Option<TextureCache<'tc>>,
         position: DrawPosition,
     ) -> Result<(), CacheableGraphicError> {
         if self.width() == 0 || self.height() == 0 {
@@ -1441,6 +1455,7 @@ impl<'tc> TextureCache<'tc> {
     }
 }
 
+// TODO: Make this a cacheable graphic, don't forget to add the color as a property.
 struct FontRenderer<'ft, 'tc> {
     font: ttf::Font<'ft>,
     texture_cache: HashMap<String, Rc<render::Texture<'tc>>>,
@@ -1456,7 +1471,6 @@ impl<'ft, 'tc> FontRenderer<'ft, 'tc> {
     }
 }
 
-// TODO: Make this a cacheable graphic, don't forget to add the color as a property.
 // TODO: Delete this function once fonts implement the CacheableGraphic trait
 fn get_positioned_texture<'tc, T>(
     text: &str,
@@ -1644,7 +1658,12 @@ pub fn main() {
     );
 
     // Initialize the texture caching system
-    let mut texture_cache: TextureCache = TextureCache::init();
+    // TODO: Create a rendering context with texture_cache as a potential struct field
+    //       this could include the texture creator, can be passed as one object to rendering
+    //       functions rether than always including both the texture creator and the cache
+    //       separately. And it could also remove the need to alway have a visible variable of type
+    //       Option<TextureCache> circulating in the main function.
+    let mut texture_cache: Option<TextureCache> = Some(TextureCache::init());
 
     // Render text textures
     let mut hold_space_posed_texture = get_positioned_texture(
@@ -1888,12 +1907,7 @@ pub fn main() {
         // Render the car
         canvas.set_draw_color(Color::RGB(200, 0, 0));
         failed_rendering |= car
-            .pretty_render(
-                current_camera,
-                &mut canvas,
-                &texture_creator,
-                &mut texture_cache,
-            )
+            .pretty_render(current_camera, &mut canvas, &texture_creator, &mut None)
             .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
             .is_err();
 
@@ -1904,12 +1918,7 @@ pub fn main() {
         // Debug car vectors
         if MOUVEMENT_DEBUG {
             failed_rendering |= car
-                .render_debug_vectors(
-                    current_camera,
-                    &mut canvas,
-                    &texture_creator,
-                    &mut texture_cache,
-                )
+                .render_debug_vectors(current_camera, &mut canvas, &texture_creator, &mut None)
                 .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
                 .is_err();
         }
@@ -2053,6 +2062,6 @@ pub fn main() {
 
         game_tick_counter += 1;
 
-        // println!("{}", texture_cache.texture_cache.len());
+        println!("{}", texture_cache.as_ref().unwrap().texture_cache.len());
     }
 }

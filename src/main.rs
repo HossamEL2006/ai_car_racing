@@ -793,17 +793,17 @@ impl BezierPathConfig {
 }
 
 impl BezierPath {
-    fn render<'tc, T>(
+    fn render<'tc, T: RenderTarget, U>(
         &self,
         camera: &Camera,
-        canvas: &mut Canvas<Window>,
-        texture_creator: &'tc render::TextureCreator<T>,
+        canvas: &mut Canvas<T>,
+        texture_creator: &'tc render::TextureCreator<U>,
         texture_cache: &mut Option<TextureCache<'tc>>,
     ) -> Result<(), CacheableGraphicError> {
         CacheableGPolygon::new(
             &Polygon::new(&self.coords),
             Color::RGB(255, 255, 255),
-            true,
+            false,
             camera,
         )
         .draw_onto(
@@ -819,8 +819,6 @@ impl BezierPath {
         camera: &Camera,
         canvas: &mut Canvas<Window>,
     ) -> Result<(), sdl3::Error> {
-        let curr_color: Color = canvas.draw_color();
-
         for [right, center, left] in self.anchor_triplets.iter() {
             canvas.set_draw_color(Color::RGB(0, 255, 0));
             canvas
@@ -845,8 +843,6 @@ impl BezierPath {
                 .draw_line(center.as_point(camera), self.config.center.as_point(camera))
                 .unwrap();
         }
-
-        canvas.set_draw_color(curr_color);
         Ok(())
     }
 
@@ -969,7 +965,7 @@ enum DrawPosition<'cm> {
     RealCoords { camera: &'cm Camera },
 }
 
-// TODO: Consider deleting this struct once everything (including font) implement CacheableGraphic
+// TODO: Delete this
 struct PositionedTexture<'tc> {
     // 'tc is the lifetime of the texture creator
     texture: Rc<render::Texture<'tc>>,
@@ -980,14 +976,6 @@ impl<'tc> PositionedTexture<'tc> {
     fn set_pos(&mut self, x: i32, y: i32) {
         self.rect.set_x(x);
         self.rect.set_y(y);
-    }
-
-    fn width(&self) -> i32 {
-        self.rect.width() as i32
-    }
-
-    fn height(&self) -> i32 {
-        self.rect.height() as i32
     }
 
     fn draw_onto<T: RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
@@ -1017,6 +1005,11 @@ enum HashableGraphicProps {
         px_per_meter: u32,
         color: Color,
     },
+    Text {
+        text: String,
+        font_name: String,
+        color: Color,
+    },
 }
 
 // TODO: Make CacheableGraphic generic over HashableGraphicProps
@@ -1032,7 +1025,10 @@ trait CacheableGraphic {
     // TODO: Leverage Rust's type system to enforce that world_anchor is only implemented for
     //       those graphics
 
-    fn render<T: RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error>;
+    fn render_texture<'tc, T>(
+        &self,
+        texture_creator: &'tc render::TextureCreator<T>,
+    ) -> Result<render::Texture<'tc>, CacheableGraphicError>;
 
     fn get_texture<'tc, T>(
         &self,
@@ -1048,22 +1044,7 @@ trait CacheableGraphic {
         {
             Some(hash_map::Entry::Occupied(entry)) => Ok(Rc::clone(entry.get())),
             other => {
-                let empty_surface =
-                    Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
-                        .map_err(CacheableGraphicError::SurfaceCreation)?;
-
-                let mut canvas = empty_surface
-                    .into_canvas()
-                    .map_err(CacheableGraphicError::SurfaceToCanvas)?;
-
-                self.render(&mut canvas)
-                    .map_err(CacheableGraphicError::CanvasRender)?;
-
-                let surface = canvas.into_surface();
-
-                let texture = texture_creator
-                    .create_texture_from_surface(&surface)
-                    .map_err(CacheableGraphicError::TextureCreation)?;
+                let texture = self.render_texture(texture_creator)?;
 
                 if let Some(hash_map::Entry::Vacant(entry)) = other {
                     let rc_texture = Rc::new(texture);
@@ -1140,6 +1121,7 @@ enum CacheableGraphicError {
     CanvasRender(sdl3::Error),
     TextureCreation(render::TextureValueError),
     TextureCopy(sdl3::Error),
+    Other(String),
 }
 
 struct Circle {
@@ -1171,7 +1153,15 @@ impl CacheableGraphic for Circle {
         None
     }
 
-    fn render<T: RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+    fn render_texture<'tc, T>(
+        &self,
+        texture_creator: &'tc render::TextureCreator<T>,
+    ) -> Result<render::Texture<'tc>, CacheableGraphicError> {
+        let mut canvas = Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
+            .map_err(CacheableGraphicError::SurfaceCreation)?
+            .into_canvas()
+            .map_err(CacheableGraphicError::SurfaceToCanvas)?;
+
         canvas.set_draw_color(self.color);
 
         let radius: f32 = self.radius;
@@ -1182,9 +1172,16 @@ impl CacheableGraphic for Circle {
             let y1: f32 = radius * theta1.sin() + radius;
             let x2: f32 = radius * theta2.cos() + radius;
             let y2: f32 = radius * theta2.sin() + radius;
-            canvas.draw_line((x1, y1), (x2, y2))?;
+            canvas
+                .draw_line((x1, y1), (x2, y2))
+                .map_err(CacheableGraphicError::CanvasRender)?;
         }
-        Ok(())
+
+        let texture = texture_creator
+            .create_texture_from_surface(canvas.into_surface())
+            .map_err(CacheableGraphicError::TextureCreation)?;
+
+        Ok(texture)
     }
 }
 
@@ -1217,17 +1214,32 @@ impl CacheableGraphic for Disc {
         None
     }
 
-    fn render<T: RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+    fn render_texture<'tc, T>(
+        &self,
+        texture_creator: &'tc render::TextureCreator<T>,
+    ) -> Result<render::Texture<'tc>, CacheableGraphicError> {
+        let mut canvas = Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
+            .map_err(CacheableGraphicError::SurfaceCreation)?
+            .into_canvas()
+            .map_err(CacheableGraphicError::SurfaceToCanvas)?;
+
         canvas.set_draw_color(self.color);
 
         let radius: f32 = self.radius;
         for i in -(radius as i16)..=(radius as i16) {
             let y_offset = (radius * radius - (i as f32) * (i as f32)).sqrt() as i16;
             for j in -y_offset..=y_offset {
-                canvas.draw_point((radius + i as f32, radius + j as f32))?;
+                canvas
+                    .draw_point((radius + i as f32, radius + j as f32))
+                    .map_err(CacheableGraphicError::CanvasRender)?;
             }
         }
-        Ok(())
+
+        let texture = texture_creator
+            .create_texture_from_surface(canvas.into_surface())
+            .map_err(CacheableGraphicError::TextureCreation)?;
+
+        Ok(texture)
     }
 }
 
@@ -1290,7 +1302,15 @@ impl CacheableGraphic for CacheableGVector {
         Some(self.base_point)
     }
 
-    fn render<T: RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+    fn render_texture<'tc, T>(
+        &self,
+        texture_creator: &'tc render::TextureCreator<T>,
+    ) -> Result<render::Texture<'tc>, CacheableGraphicError> {
+        let mut canvas = Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
+            .map_err(CacheableGraphicError::SurfaceCreation)?
+            .into_canvas()
+            .map_err(CacheableGraphicError::SurfaceToCanvas)?;
+
         let (start_x, start_y) = (self.width() as i32 / 2, self.height() as i32 / 2);
         let end_x = start_x + self.x.ceil() as i32;
         let end_y = start_y + self.y.ceil() as i32;
@@ -1302,7 +1322,9 @@ impl CacheableGraphic for CacheableGVector {
             canvas.set_draw_color(color);
         }
 
-        canvas.draw_line(start_point, end_point)?;
+        canvas
+            .draw_line(start_point, end_point)
+            .map_err(CacheableGraphicError::CanvasRender)?;
 
         // TODO: Simplify this spaghetti by implementing a vector type with rotation and scaling
         //       operations, this struct should be different from the IRL Vector previously
@@ -1315,40 +1337,45 @@ impl CacheableGraphic for CacheableGVector {
         let vec_length = (vec.0.pow(2) + vec.1.pow(2)) as f32;
         let vec_length = vec_length.sqrt();
 
-        if vec_length < 1e-6 {
-            return Ok(());
+        if vec_length > 1e-6 {
+            let vec_rotated1 = (
+                vec.0 as f32 * theta.cos() - vec.1 as f32 * theta.sin(),
+                vec.0 as f32 * theta.sin() + vec.1 as f32 * theta.cos(),
+            );
+            let vec_rotated2 = (
+                vec.0 as f32 * theta.cos() + vec.1 as f32 * theta.sin(),
+                -(vec.0 as f32) * theta.sin() + vec.1 as f32 * theta.cos(),
+            );
+
+            let vec_rotated1 = (
+                vec_rotated1.0 * tip_size / vec_length,
+                vec_rotated1.1 * tip_size / vec_length,
+            );
+            let vec_rotated2 = (
+                vec_rotated2.0 * tip_size / vec_length,
+                vec_rotated2.1 * tip_size / vec_length,
+            );
+
+            let tip_point1 = rect::Point::new(
+                (end_x as f32 + vec_rotated1.0) as i32,
+                (end_y as f32 + vec_rotated1.1) as i32,
+            );
+            let tip_point2 = rect::Point::new(
+                (end_x as f32 + vec_rotated2.0) as i32,
+                (end_y as f32 + vec_rotated2.1) as i32,
+            );
+
+            canvas
+                .draw_line(end_point, tip_point1)
+                .map_err(CacheableGraphicError::CanvasRender)?;
+            canvas
+                .draw_line(end_point, tip_point2)
+                .map_err(CacheableGraphicError::CanvasRender)?;
         }
-
-        let vec_rotated1 = (
-            vec.0 as f32 * theta.cos() - vec.1 as f32 * theta.sin(),
-            vec.0 as f32 * theta.sin() + vec.1 as f32 * theta.cos(),
-        );
-        let vec_rotated2 = (
-            vec.0 as f32 * theta.cos() + vec.1 as f32 * theta.sin(),
-            -(vec.0 as f32) * theta.sin() + vec.1 as f32 * theta.cos(),
-        );
-
-        let vec_rotated1 = (
-            vec_rotated1.0 * tip_size / vec_length,
-            vec_rotated1.1 * tip_size / vec_length,
-        );
-        let vec_rotated2 = (
-            vec_rotated2.0 * tip_size / vec_length,
-            vec_rotated2.1 * tip_size / vec_length,
-        );
-
-        let tip_point1 = rect::Point::new(
-            (end_x as f32 + vec_rotated1.0) as i32,
-            (end_y as f32 + vec_rotated1.1) as i32,
-        );
-        let tip_point2 = rect::Point::new(
-            (end_x as f32 + vec_rotated2.0) as i32,
-            (end_y as f32 + vec_rotated2.1) as i32,
-        );
-
-        canvas.draw_line(end_point, tip_point1)?;
-        canvas.draw_line(end_point, tip_point2)?;
-        Ok(())
+        let texture = texture_creator
+            .create_texture_from_surface(canvas.into_surface())
+            .map_err(CacheableGraphicError::TextureCreation)?;
+        Ok(texture)
     }
 }
 
@@ -1473,7 +1500,10 @@ impl CacheableGraphic for CacheableGPolygon {
         Some(Coords::init(0., 0.))
     }
 
-    fn render<T: RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
+    fn render_texture<'tc, T>(
+        &self,
+        texture_creator: &'tc sdl3::render::TextureCreator<T>,
+    ) -> Result<sdl3::render::Texture<'tc>, CacheableGraphicError> {
         fn render_filled<T: RenderTarget>(
             gpolygon: &CacheableGPolygon,
             canvas: &mut Canvas<T>,
@@ -1553,19 +1583,25 @@ impl CacheableGraphic for CacheableGPolygon {
             Ok(())
         }
 
-        if self.fpoints.len() < 3 {
-            return Ok(());
+        let mut canvas = Surface::new(self.width(), self.height(), pixels::PixelFormat::RGBA32)
+            .map_err(CacheableGraphicError::SurfaceCreation)?
+            .into_canvas()
+            .map_err(CacheableGraphicError::SurfaceToCanvas)?;
+
+        if self.fpoints.len() > 2 {
+            canvas.set_draw_color(self.color);
+
+            if self.filled {
+                render_filled(self, &mut canvas).map_err(CacheableGraphicError::CanvasRender)?;
+            } else {
+                render_outline(self, &mut canvas).map_err(CacheableGraphicError::CanvasRender)?;
+            }
         }
 
-        canvas.set_draw_color(self.color);
-
-        if self.filled {
-            render_filled(self, canvas)?;
-            Ok(())
-        } else {
-            render_outline(self, canvas)?;
-            Ok(())
-        }
+        let texture = texture_creator
+            .create_texture_from_surface(canvas.into_surface())
+            .map_err(CacheableGraphicError::TextureCreation)?;
+        Ok(texture)
     }
 }
 
@@ -1584,51 +1620,90 @@ impl<'tc> TextureCache<'tc> {
 }
 
 // TODO: Make this a cacheable graphic, don't forget to add the color as a property.
-struct FontRenderer<'ft, 'tc> {
-    font: ttf::Font<'ft>,
-    texture_cache: HashMap<String, Rc<render::Texture<'tc>>>,
-    // used Rc to allow returning pointers to the texture even if the mutable borrow is dropped
+struct TextFont<'tc> {
+    font: ttf::Font<'tc>,
+    ttf_name: String,
 }
 
-impl<'ft, 'tc> FontRenderer<'ft, 'tc> {
-    fn init(font: ttf::Font<'ft>) -> Self {
+impl PartialEq for TextFont<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ttf_name == other.ttf_name
+    }
+}
+
+impl Eq for TextFont<'_> {}
+
+impl std::hash::Hash for TextFont<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ttf_name.hash(state);
+    }
+}
+
+impl<'tc> TextFont<'tc> {
+    fn init(font: ttf::Font<'tc>, font_name: &str) -> Self {
         Self {
             font,
-            texture_cache: HashMap::new(),
+            ttf_name: font_name.to_string(),
         }
     }
 }
 
-// TODO: Delete this function once fonts implement the CacheableGraphic trait
-fn get_positioned_texture<'tc, T>(
-    text: &str,
-    font_renderer: &mut FontRenderer<'_, 'tc>,
-    texture_creator: &'tc render::TextureCreator<T>,
-) -> Result<PositionedTexture<'tc>, TextRenderError> {
-    if !font_renderer.texture_cache.contains_key(text) {
-        let surface = font_renderer
-            .font
-            .render(text)
-            .blended(Color::RGB(255, 255, 255))
-            .map_err(TextRenderError::FontRender)?;
+struct CacheableText<'ft, 'tc> {
+    text: String,
+    font: &'ft TextFont<'tc>,
+    color: Color,
+}
 
-        let texture = texture_creator
-            .create_texture_from_surface(&surface)
-            .map_err(TextRenderError::TextureCreation)?;
+impl<'ft, 'tc> CacheableText<'ft, 'tc> {
+    fn new(text: &str, font: &'ft TextFont<'tc>, color: Color) -> Self {
+        Self {
+            text: text.to_string(),
+            font,
+            color,
+        }
+    }
+}
 
-        font_renderer
-            .texture_cache
-            .insert(text.to_string(), Rc::new(texture));
+impl<'ft, 'tc> CacheableGraphic for CacheableText<'ft, 'tc> {
+    fn hashable_properties(&self) -> HashableGraphicProps {
+        HashableGraphicProps::Text {
+            text: self.text.clone(),
+            font_name: self.font.ttf_name.clone(),
+            color: self.color,
+        }
     }
 
-    let texture = font_renderer.texture_cache.get(text).unwrap();
-    let query = texture.query();
-    let rect = rect::Rect::new(0, 0, query.width, query.height);
+    fn width(&self) -> u32 {
+        self.font.font.size_of(&self.text).unwrap().0
+    }
 
-    Ok(PositionedTexture {
-        texture: Rc::clone(texture),
-        rect,
-    })
+    fn height(&self) -> u32 {
+        self.font.font.size_of(&self.text).unwrap().1
+    }
+
+    fn pixel_anchor(&self) -> (i32, i32) {
+        (0, 0)
+    }
+
+    fn world_anchor(&self) -> Option<Coords> {
+        None
+    }
+
+    fn render_texture<'txc, T>(
+        &self,
+        texture_creator: &'txc render::TextureCreator<T>,
+    ) -> Result<render::Texture<'txc>, CacheableGraphicError> {
+        let surface = self
+            .font
+            .font
+            .render(&self.text)
+            .blended(self.color)
+            .map_err(|e| CacheableGraphicError::Other(e.to_string()))?;
+        let texture = texture_creator
+            .create_texture_from_surface(&surface)
+            .map_err(CacheableGraphicError::TextureCreation)?;
+        Ok(texture)
+    }
 }
 
 #[allow(dead_code)]
@@ -1779,10 +1854,11 @@ pub fn main() {
 
     // Initialize Renderers
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
-    let mut font_renderer: FontRenderer = FontRenderer::init(
+    let text_font: TextFont = TextFont::init(
         ttf_context
             .load_font("assets/Basic-Regular.ttf", 25.)
             .unwrap(),
+        "Basic-Regular",
     );
 
     // Initialize the texture caching system
@@ -1794,43 +1870,26 @@ pub fn main() {
     let mut texture_cache: Option<TextureCache> = Some(TextureCache::init());
 
     // Render text textures
-    let mut hold_space_posed_texture = get_positioned_texture(
+    let hold_space_text = CacheableText::new(
         "PRESS ENTER TO TOGGLE CAMERAS",
-        &mut font_renderer,
-        &texture_creator,
-    )
-    .unwrap();
-    // TODO : Implement position specification for `text_posed_texture` to avoid having to
-    //        call `set_pos` separately
-    hold_space_posed_texture.set_pos(
-        10,
-        SCREEN_HEIGHT as i32 - hold_space_posed_texture.height() - 10,
+        &text_font,
+        Color::RGB(255, 255, 255),
     );
 
-    let mut js_name_posed_texture = get_positioned_texture(
-        "No controller detected at startup",
-        &mut font_renderer,
-        &texture_creator,
-    )
-    .unwrap();
+    let mut js_name_str = "No controller detected at startup".to_string();
+
     if let Some(js) = &joystick {
         println!("Joystick connected: {:?}", js.name());
-        js_name_posed_texture = get_positioned_texture(
-            &format!("Controller: {}", js.name()),
-            &mut font_renderer,
-            &texture_creator,
-        )
-        .unwrap();
+        js_name_str = format!("Controller: {}", js.name());
     }
-    js_name_posed_texture.set_pos(SCREEN_WIDTH as i32 - js_name_posed_texture.width() - 10, 10);
 
-    let mut seed_posed_texture = get_positioned_texture(
+    let js_name_text = CacheableText::new(&js_name_str, &text_font, Color::RGB(255, 255, 255));
+
+    let seed_text = CacheableText::new(
         &format!("SEED: {}", seed),
-        &mut font_renderer,
-        &texture_creator,
-    )
-    .unwrap();
-    seed_posed_texture.set_pos(10, 10);
+        &text_font,
+        Color::RGB(255, 255, 255),
+    );
 
     // Initialize an FPS sample queue to monitor average FPS across 3 seconds
     let mut fps_sample: VecDeque<f32> = VecDeque::with_capacity(3 * GAME_FPS as usize);
@@ -2055,21 +2114,39 @@ pub fn main() {
             timestamps.push(time.elapsed().as_micros());
         }
 
-        // Write "PRESS ENTER TO TOGGLE CAMERAS"
-        failed_rendering |= hold_space_posed_texture
-            .draw_onto(&mut canvas)
+        failed_rendering |= hold_space_text
+            .draw_onto(
+                &mut canvas,
+                &texture_creator,
+                &mut texture_cache,
+                DrawPosition::ScreenCoords {
+                    x: 10,
+                    y: SCREEN_HEIGHT as i32 - hold_space_text.height() as i32 - 10,
+                },
+            )
             .map_err(|e| eprintln!("Failed to render the hold space text: {:?}", e))
             .is_err();
 
-        // Render controller name
-        failed_rendering |= js_name_posed_texture
-            .draw_onto(&mut canvas)
+        failed_rendering |= js_name_text
+            .draw_onto(
+                &mut canvas,
+                &texture_creator,
+                &mut texture_cache,
+                DrawPosition::ScreenCoords {
+                    x: SCREEN_WIDTH as i32 - js_name_text.width() as i32 - 10,
+                    y: 10,
+                },
+            )
             .map_err(|e| eprintln!("Failed to render the joystick name text: {:?}", e))
             .is_err();
 
-        // Render seed text
-        failed_rendering |= seed_posed_texture
-            .draw_onto(&mut canvas)
+        failed_rendering |= seed_text
+            .draw_onto(
+                &mut canvas,
+                &texture_creator,
+                &mut texture_cache,
+                DrawPosition::ScreenCoords { x: 10, y: 10 },
+            )
             .map_err(|e| eprintln!("Failed to render the seed text: {:?}", e))
             .is_err();
 

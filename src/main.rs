@@ -3,7 +3,7 @@ use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 use sdl3::{
     event::Event,
-    joystick::Joystick,
+    joystick::{Joystick, JoystickId},
     keyboard::{KeyboardState, Keycode, Scancode},
     mouse::MouseButton,
     pixels::{self, Color},
@@ -149,7 +149,7 @@ impl Coords {
 }
 
 impl Vector {
-    fn init(x: f32, y: f32) -> Vector {
+    fn new(x: f32, y: f32) -> Vector {
         Vector {
             x: Meter(x),
             y: Meter(y),
@@ -427,8 +427,8 @@ impl Car {
             direction_vec: direction.normalized(),
             length: Meter(5.),
             width: Meter(2.),
-            engine_acc: Vector::init(0., 0.),
-            velocity: Vector::init(0., 0.),
+            engine_acc: Vector::new(0., 0.),
+            velocity: Vector::new(0., 0.),
             friction_factor: FRICTION_FACTOR,
             car_polys: Vec::new(),
         };
@@ -693,7 +693,7 @@ impl BezierPathConfig {
                 let angle_dev: f32 = angle_dev_dist.sample(rng);
                 let new_angle: f32 = angle + angle_dev.to_radians();
 
-                let track_dir_vector: Vector = Vector::init(new_angle.cos(), new_angle.sin());
+                let track_dir_vector: Vector = Vector::new(new_angle.cos(), new_angle.sin());
 
                 let subanchor_dist_coef: f32 = 0.4;
 
@@ -1678,11 +1678,181 @@ impl<'ft, 'tc> CacheableGraphic for CacheableText<'ft, 'tc> {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-enum TextRenderError {
-    FontRender(ttf::FontError),
-    TextureCreation(render::TextureValueError),
+enum PlayerControl {
+    Gamepad(Joystick),
+    SideJoystick { id: u8, button: Keycode },
+    CenteredJoystick { button: Keycode },
+    RustFunction(fn(&Car, &Track) -> Vector),
+    ExternalFunction,
+    None,
+}
+
+struct PlayerProfile {
+    name: String,
+    control: PlayerControl,
+}
+
+struct Player {
+    profile: PlayerProfile,
+    car: Car,
+}
+
+struct Track {
+    outer_border: Polygon,
+    inner_border: Polygon,
+    circuit_polygon: Polygon,
+    bezier_path: BezierPath,
+    starting_point: Coords,
+    starting_direction: Vector,
+}
+
+impl Track {
+    fn from_bezier(bezier_path: BezierPath, path_width: f32) -> Self {
+        let (outer_border, inner_border) = bezier_path.generate_path_borders(path_width);
+        let starting_point: Coords = bezier_path.starting_point;
+        let starting_direction: Vector = bezier_path.starting_direction;
+        let inner_border = Polygon::new(
+            inner_border
+                .iter()
+                .chain(iter::once(inner_border.first().unwrap()))
+                .copied()
+                .collect::<Vec<Coords>>()
+                .as_slice(),
+        );
+        let outer_border = Polygon::new(
+            outer_border
+                .iter()
+                .chain(iter::once(outer_border.first().unwrap()))
+                .copied()
+                .collect::<Vec<Coords>>()
+                .as_slice(),
+        );
+        let circuit_polygon: Polygon = Polygon::new(
+            inner_border
+                .vertices
+                .iter()
+                .chain(outer_border.vertices.iter().rev())
+                .copied()
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
+        Self {
+            outer_border,
+            inner_border,
+            circuit_polygon,
+            bezier_path,
+            starting_point,
+            starting_direction,
+        }
+    }
+}
+
+struct Game {
+    players: Vec<Player>,
+    track: Track,
+    seed: u64,
+    game_tick: u32,
+    dt: f32,
+}
+
+impl Game {
+    fn init_game(
+        profiles: Vec<PlayerProfile>,
+        seed: Option<u64>,
+        path_width: f32,
+        dt: f32,
+    ) -> Self {
+        let seed: u64 = seed.unwrap_or_else(|| rand::random_range(0..u64::MAX));
+        let path_config: BezierPathConfig = BezierPathConfig::default();
+        let path: BezierPath = path_config.generate_path(Some(seed));
+        let track: Track = Track::from_bezier(path, path_width);
+
+        let players = profiles
+            .into_iter()
+            .map(|profile| Player {
+                profile,
+                car: Car::init(track.starting_point, track.starting_direction),
+            })
+            .collect();
+
+        Self {
+            players,
+            track,
+            seed,
+            game_tick: 0,
+            dt,
+        }
+    }
+}
+
+impl Game {
+    fn get_player_decision(player_control: &PlayerControl) -> PlayerDecision {
+        match player_control {
+            PlayerControl::Gamepad(joystick) => {
+                let axis_0: f32 = joystick.axis(0).unwrap_or(0) as f32 / 32768.0;
+                let axis_1: f32 = joystick.axis(1).unwrap_or(0) as f32 / 32768.0;
+                let joystick_direction = Vector::new(axis_0, -axis_1);
+                let acceleration_pressed = joystick.button(0).unwrap_or(false);
+                PlayerDecision {
+                    direction: joystick_direction,
+                    accelerate: acceleration_pressed,
+                }
+            }
+            PlayerControl::SideJoystick { id, button } => todo!(),
+            PlayerControl::CenteredJoystick { button } => todo!(),
+            PlayerControl::RustFunction(f) => todo!(),
+            PlayerControl::ExternalFunction => todo!(),
+            PlayerControl::None => PlayerDecision {
+                direction: Vector::new(0., 0.),
+                accelerate: false,
+            },
+        }
+    }
+
+    fn update(&mut self) {
+        // Apply player input to the car's acceleration
+        for player in &mut self.players {
+            let decision = Self::get_player_decision(&player.profile.control);
+            let joystick_direction = decision.direction;
+            let acceleration_pressed = decision.accelerate;
+            let car = &mut player.car;
+            if acceleration_pressed {
+                let engine_acc_vec = if joystick_direction.norm().0 < 0.2 {
+                    Vector::new(0.0, 0.0)
+                } else {
+                    joystick_direction.normalized()
+                };
+                car.set_engine_acc(ENGINE_ACCELERATION * engine_acc_vec);
+            } else {
+                car.set_engine_acc(Vector::new(0.0, 0.0));
+            }
+
+            // Check if any of the 4 corners of the car rect is outside the circuit polygon
+            let mut friction_multiplier: f32 = 2.0;
+            let car_corners: [Coords; 4] = car.corner_coords();
+            let mut is_car_inside: bool = true;
+            for corner in &car_corners {
+                if !self.track.circuit_polygon.contains(*corner) {
+                    is_car_inside = false;
+                    friction_multiplier += 1.0;
+                }
+            }
+            if is_car_inside {
+                car.set_friction_factor(FRICTION_FACTOR);
+            } else {
+                car.set_friction_factor(friction_multiplier * FRICTION_FACTOR);
+            }
+
+            // Update the car's coordinates based on its current acceleration and velocity
+            car.update_coords(self.dt);
+        }
+        self.game_tick += 1;
+    }
+}
+
+struct PlayerDecision {
+    direction: Vector,
+    accelerate: bool,
 }
 
 const CAMERA_WIDTH: u32 = 1200;
@@ -1703,12 +1873,12 @@ const THEORETICAL_MAX_SPEED: f32 = 100.; // in m/s
 const FRICTION_FACTOR: f32 = LN_100 / TIME_TO_99_PERC_SPEED;
 const ENGINE_ACCELERATION: f32 = THEORETICAL_MAX_SPEED * FRICTION_FACTOR;
 
-const N_ANCHORS: usize = 8;
+const N_ANCHORS: usize = 10;
 const MEAN_ANCHOR_RADIUS: f32 = 120.;
-const STDEV_ANCHOR_RADIUS: f32 = 45.;
+const STDEV_ANCHOR_RADIUS: f32 = 55.;
 const STDEV_SUBANCHOR_ANGLE_DEV: f32 = (360. / N_ANCHORS as f32) / 3.0;
 const POINTS_PER_BEZIER_CURVE: usize = 15;
-const PATH_WIDTH: f32 = 12.0;
+const PATH_WIDTH: f32 = 15.0;
 
 const CIRCUIT_DEBUG: bool = false;
 const MOUVEMENT_DEBUG: bool = true;
@@ -1758,52 +1928,6 @@ pub fn main() {
     // Initialize a texture creator
     let texture_creator: render::TextureCreator<WindowContext> = canvas.texture_creator();
 
-    // Setup a game tick counter
-    let mut game_tick_counter: u32 = 0;
-    // Generate the circuit
-    let seed: u64 = rand::random_range(0..u64::MAX);
-    println!("Seed: {}", seed);
-    let path_config: BezierPathConfig = BezierPathConfig::default();
-    let path: BezierPath = path_config.generate_path(Some(seed));
-    let (outer_border, inner_border) = path.generate_path_borders(PATH_WIDTH);
-    let starting_point: Coords = path.starting_point;
-    let starting_direction: Vector = path.starting_direction;
-    let inner_border_loop = inner_border
-        .iter()
-        .chain(iter::once(inner_border.first().unwrap()));
-    let outer_border_loop = outer_border
-        .iter()
-        .chain(iter::once(outer_border.first().unwrap()));
-    let circuit_enclosed_area: Polygon = Polygon::new(&inner_border);
-    let circuit_polygon: Polygon = Polygon::new(
-        inner_border_loop
-            .chain(outer_border_loop.rev())
-            .copied()
-            .collect::<Vec<_>>()
-            .as_slice(),
-    );
-
-    // Initialize a car
-    let mut car: Car = Car::init(starting_point, starting_direction);
-
-    // Initialize the cameras
-    let mut car_camera: Camera = Camera {
-        width: CAMERA_WIDTH,
-        height: CAMERA_HEIGHT,
-        coords: car.coords,
-        px_per_meter: (CAMERA_WIDTH as f32 / (car.length.0 / 0.04)).round() as u32,
-        // car length is 4% of the camera width
-    };
-
-    let fix_camera: Camera = Camera {
-        width: CAMERA_WIDTH,
-        height: CAMERA_HEIGHT,
-        coords: Coords::init(0., 0.),
-        px_per_meter: 2,
-    };
-
-    let mut current_camera: usize = 0; // 0 for car_camera, 1 for fix_camera
-
     // Initalize connection with a controller joystick
     let mut joystick: Option<Joystick> = None;
     if let Ok(joystick_subsystem) = sdl_context.joystick() {
@@ -1821,10 +1945,49 @@ pub fn main() {
         }
     }
 
+    // Initialize the Game
+    let control = match joystick {
+        Some(js) => PlayerControl::Gamepad(js),
+        None => PlayerControl::SideJoystick {
+            id: 0,
+            button: Keycode::Space,
+        },
+    };
+
+    let mut game: Game = Game::init_game(
+        vec![PlayerProfile {
+            name: "Human1".to_string(),
+            control,
+        }],
+        None,
+        PATH_WIDTH,
+        DT,
+    );
+
+    // Initialize the cameras
+    let mut car_camera: Camera = Camera {
+        width: CAMERA_WIDTH,
+        height: CAMERA_HEIGHT,
+        coords: game.players[0].car.coords,
+        px_per_meter: (CAMERA_WIDTH as f32 / (game.players[0].car.length.0 / 0.04)).round() as u32,
+        // car length is 4% of the camera width
+    };
+
+    let followed_car_index: usize = 0;
+
+    let fix_camera: Camera = Camera {
+        width: CAMERA_WIDTH,
+        height: CAMERA_HEIGHT,
+        coords: Coords::init(0., 0.),
+        px_per_meter: 2,
+    };
+
+    let mut current_camera: usize = 0; // 0 for car_camera, 1 for fix_camera
+
     // GUI
     let mut joystick_gui_pressed: bool = false;
 
-    // Initialize Renderers
+    // Initialize Font
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
     let text_font: TextFont = TextFont::init(
         ttf_context
@@ -1848,17 +2011,16 @@ pub fn main() {
         Color::RGB(255, 255, 255),
     );
 
-    let mut js_name_str = "No controller detected at startup".to_string();
-
-    if let Some(js) = &joystick {
-        println!("Joystick connected: {:?}", js.name());
-        js_name_str = format!("Controller: {}", js.name());
-    }
+    let js_name_str = if let PlayerControl::Gamepad(js) = &game.players[0].profile.control {
+        format!("Controller: {}", js.name())
+    } else {
+        "No controller detected at startup".to_string()
+    };
 
     let js_name_text = CacheableText::new(&js_name_str, &text_font, Color::RGB(255, 255, 255));
 
     let seed_text = CacheableText::new(
-        &format!("SEED: {}", seed),
+        &format!("SEED: {}", game.seed),
         &text_font,
         Color::RGB(255, 255, 255),
     );
@@ -1877,7 +2039,7 @@ pub fn main() {
         let mut timestamps: Vec<u128> = Vec::new();
 
         let mut acceleration_pressed: bool = false;
-        let mut joystick_direction: Vector = Vector::init(0.0, 0.0);
+        let mut joystick_direction: Vector = Vector::new(0.0, 0.0);
 
         // Read the events
         for event in event_pump.poll_iter() {
@@ -1918,14 +2080,6 @@ pub fn main() {
 
         let keyboard_state: KeyboardState<'_> = event_pump.keyboard_state();
 
-        // Read joystick input
-        if let Some(js) = &joystick {
-            let axis_0: f32 = js.axis(0).unwrap_or(0) as f32 / 32768.0;
-            let axis_1: f32 = js.axis(1).unwrap_or(0) as f32 / 32768.0;
-            joystick_direction = Vector::init(axis_0, -axis_1);
-            acceleration_pressed = js.button(0).unwrap_or(false);
-        }
-
         // Read mouse and keyboard output
         let space_pressed: bool = keyboard_state.is_scancode_pressed(Scancode::Space);
         acceleration_pressed |= space_pressed;
@@ -1934,7 +2088,7 @@ pub fn main() {
             let mouse_y: f32 = event_pump.mouse_state().y();
             let dx: f32 = mouse_x - JOYSTICK_POSITION.0 as f32;
             let dy: f32 = mouse_y - JOYSTICK_POSITION.1 as f32;
-            joystick_direction = (1. / JOYSTICK_MAX_REACH_RADIUS) * Vector::init(dx, -dy);
+            joystick_direction = (1. / JOYSTICK_MAX_REACH_RADIUS) * Vector::new(dx, -dy);
             if joystick_direction.norm().0 > 1.0 {
                 joystick_direction = joystick_direction.normalized();
             }
@@ -1944,43 +2098,14 @@ pub fn main() {
             timestamps.push(time.elapsed().as_micros());
         }
 
-        // Apply player input to the car's acceleration
-        if acceleration_pressed {
-            let engine_acc_vec = if joystick_direction.norm().0 < 0.2 {
-                Vector::init(0.0, 0.0)
-            } else {
-                joystick_direction.normalized()
-            };
-            car.set_engine_acc(ENGINE_ACCELERATION * engine_acc_vec);
-        } else {
-            car.set_engine_acc(Vector::init(0.0, 0.0));
-        }
-
-        // Check if any of the 4 corners of the car rect is outside the circuit polygon
-        let mut friction_multiplier: f32 = 2.0;
-        let car_corners: [Coords; 4] = car.corner_coords();
-        let mut is_car_inside: bool = true;
-        for corner in &car_corners {
-            if !circuit_polygon.contains(*corner) {
-                is_car_inside = false;
-                friction_multiplier += 1.0;
-            }
-        }
-        if is_car_inside {
-            car.set_friction_factor(FRICTION_FACTOR);
-        } else {
-            car.set_friction_factor(friction_multiplier * FRICTION_FACTOR);
-        }
-
-        // Update the car's coordinates based on its current acceleration and velocity
-        car.update_coords(DT);
+        game.update();
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
         }
 
         // Update cameras
-        car_camera.coords = car.coords;
+        car_camera.coords = game.players[followed_car_index].car.coords;
 
         // Determine which camera to use for rendering
         let current_camera: &Camera = if current_camera == 0 {
@@ -2002,7 +2127,7 @@ pub fn main() {
 
         // Draw the circuit
         failed_rendering |= CacheableGPolygon::new(
-            &circuit_enclosed_area,
+            &game.track.inner_border,
             Color::RGB(10, 70, 10),
             true,
             current_camera,
@@ -2023,7 +2148,7 @@ pub fn main() {
         }
 
         failed_rendering |= CacheableGPolygon::new(
-            &circuit_polygon,
+            &game.track.circuit_polygon,
             Color::RGB(80, 80, 80),
             true,
             current_camera,
@@ -2044,7 +2169,9 @@ pub fn main() {
         }
 
         if CIRCUIT_DEBUG {
-            failed_rendering |= path
+            failed_rendering |= game
+                .track
+                .bezier_path
                 .render(
                     current_camera,
                     &mut canvas,
@@ -2053,7 +2180,9 @@ pub fn main() {
                 )
                 .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
                 .is_err();
-            failed_rendering |= path
+            failed_rendering |= game
+                .track
+                .bezier_path
                 .render_debug_anchors(current_camera, &mut canvas)
                 .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
                 .is_err();
@@ -2064,11 +2193,13 @@ pub fn main() {
         }
 
         // Render the car
-        canvas.set_draw_color(Color::RGB(200, 0, 0));
-        failed_rendering |= car
-            .pretty_render(current_camera, &mut canvas)
-            .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
-            .is_err();
+        for player in &game.players {
+            failed_rendering |= &player
+                .car
+                .pretty_render(current_camera, &mut canvas)
+                .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
+                .is_err();
+        }
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -2076,10 +2207,13 @@ pub fn main() {
 
         // Debug car vectors
         if MOUVEMENT_DEBUG {
-            failed_rendering |= car
-                .render_debug_vectors(current_camera, &mut canvas)
-                .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
-                .is_err();
+            for player in &game.players {
+                failed_rendering |= &player
+                    .car
+                    .render_debug_vectors(current_camera, &mut canvas)
+                    .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
+                    .is_err();
+            }
         }
 
         if REGULAR_LOG_PERF {
@@ -2162,7 +2296,7 @@ pub fn main() {
         if failed_rendering {
             eprintln!(
                 "Warning: Failed rendering one or more elements on frame {}.",
-                game_tick_counter
+                game.game_tick
             );
         }
 
@@ -2182,22 +2316,22 @@ pub fn main() {
         fps_sample.pop_front();
         let average_fps: f32 = fps_sample.iter().sum::<f32>() / fps_sample.len() as f32;
         let mut log_fps: bool =
-            REGULAR_LOG_FPS && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
+            REGULAR_LOG_FPS && game.game_tick.is_multiple_of(REGULARITY_INTERVAL);
         let mut log_perf: bool =
-            REGULAR_LOG_PERF && game_tick_counter.is_multiple_of(REGULARITY_INTERVAL);
+            REGULAR_LOG_PERF && game.game_tick.is_multiple_of(REGULARITY_INTERVAL);
 
         // If average frame rate drops below 80% of the frame target, log a warning
         if average_fps < 0.8 * GAME_FPS {
             eprintln!(
                 "Warning: Average FPS dropped below 80% of the target on frame {}.",
-                game_tick_counter
+                game.game_tick
             );
             log_fps = true;
             LOG_PERF_ON_LAG.then(|| log_perf = true);
         }
 
         if log_fps || log_perf {
-            println!("Frame {}:", game_tick_counter);
+            println!("Frame {}:", game.game_tick);
         }
 
         if log_fps {
@@ -2236,8 +2370,6 @@ pub fn main() {
         if log_fps || log_perf {
             println!();
         }
-
-        game_tick_counter += 1;
 
         // println!("{}", texture_cache.as_ref().unwrap().texture_cache.len());
     }

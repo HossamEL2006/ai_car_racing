@@ -3,9 +3,8 @@ use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 use sdl3::{
     event::Event,
-    joystick::{Joystick, JoystickId},
+    joystick::Joystick,
     keyboard::{KeyboardState, Keycode, Scancode},
-    mouse::MouseButton,
     pixels::{self, Color},
     rect,
     render::{self, Canvas, RenderTarget},
@@ -914,52 +913,6 @@ fn parse_color(color_str: &str) -> Option<Color> {
     }
 }
 
-fn render_joystick<'tc, T: RenderTarget, U>(
-    center_pos: (u32, u32),
-    direction: Vector,
-    pressed: bool,
-    canvas: &mut Canvas<T>,
-    texture_creator: &'tc render::TextureCreator<U>,
-    texture_cache: &mut Option<TextureCache<'tc>>,
-) -> Result<(), CacheableGraphicError> {
-    let (center_x, center_y) = center_pos;
-    Circle {
-        radius: JOYSTICK_OUTER_RADIUS,
-        color: Color::RGB(200, 200, 200),
-    }
-    .draw_onto(
-        canvas,
-        texture_creator,
-        texture_cache,
-        DrawPosition::ScreenCoords {
-            x: center_x as i32,
-            y: center_y as i32,
-        },
-    )?;
-
-    let pos_x: f32 = center_x as f32 + direction.x.0 * JOYSTICK_MAX_REACH_RADIUS;
-    let pos_y: f32 = center_y as f32 - direction.y.0 * JOYSTICK_MAX_REACH_RADIUS;
-
-    Disc {
-        radius: JOYSTICK_INNER_RADIUS,
-        color: if pressed {
-            Color::RGB(125, 125, 125)
-        } else {
-            Color::RGB(175, 175, 175)
-        },
-    }
-    .draw_onto(
-        canvas,
-        texture_creator,
-        texture_cache,
-        DrawPosition::ScreenCoords {
-            x: pos_x as i32,
-            y: pos_y as i32,
-        },
-    )?;
-    Ok(())
-}
-
 enum DrawPosition<'cm> {
     ScreenCoords { x: i32, y: i32 },
     RealCoords { camera: &'cm Camera },
@@ -1678,10 +1631,114 @@ impl<'ft, 'tc> CacheableGraphic for CacheableText<'ft, 'tc> {
     }
 }
 
+struct SideJoystickGUI {
+    position: (i16, i16),
+    is_clicked: bool,
+    direction: Vector,
+    acceleration_key: Scancode,
+    acceleration_pressed: bool,
+    inner_radius: f32,
+    outer_radius: f32,
+}
+
+impl SideJoystickGUI {
+    fn new(
+        position: (i16, i16),
+        acceleration_key: Scancode,
+        inner_radius: f32,
+        outer_radius: f32,
+    ) -> Self {
+        Self {
+            position,
+            is_clicked: false,
+            direction: Vector::new(0.0, 0.0),
+            acceleration_key,
+            acceleration_pressed: false,
+            inner_radius,
+            outer_radius,
+        }
+    }
+
+    fn update(&mut self, mouse_position: (f32, f32), mouse_down: bool, acceleration_pressed: bool) {
+        self.acceleration_pressed = acceleration_pressed;
+
+        if mouse_down {
+            let dist_to_joystick: f32 = ((mouse_position.0 - self.position.0 as f32).powi(2)
+                + (mouse_position.1 - self.position.1 as f32).powi(2))
+            .sqrt();
+
+            if dist_to_joystick < self.inner_radius {
+                self.is_clicked = true;
+            }
+        } else {
+            self.is_clicked = false;
+        }
+
+        if self.is_clicked {
+            let mouse_x: f32 = mouse_position.0;
+            let mouse_y: f32 = mouse_position.1;
+            let dx: f32 = mouse_x - self.position.0 as f32;
+            let dy: f32 = mouse_y - self.position.1 as f32;
+            let max_reach: f32 = self.outer_radius - 0.8 * self.inner_radius;
+            self.direction = (1. / max_reach) * Vector::new(dx, -dy);
+            if self.direction.norm().0 > 1.0 {
+                self.direction = self.direction.normalized();
+            }
+        } else {
+            self.direction = Vector::new(0.0, 0.0);
+        }
+    }
+
+    fn render<'tc, T: RenderTarget, U>(
+        &self,
+        canvas: &mut Canvas<T>,
+        texture_creator: &'tc render::TextureCreator<U>,
+        texture_cache: &mut Option<TextureCache<'tc>>,
+    ) -> Result<(), CacheableGraphicError> {
+        let (center_x, center_y) = self.position;
+        Circle {
+            radius: self.outer_radius,
+            color: Color::RGB(200, 200, 200),
+        }
+        .draw_onto(
+            canvas,
+            texture_creator,
+            texture_cache,
+            DrawPosition::ScreenCoords {
+                x: center_x as i32,
+                y: center_y as i32,
+            },
+        )?;
+
+        let max_reach = self.outer_radius - 0.8 * self.inner_radius;
+        let pos_x: f32 = center_x as f32 + self.direction.x.0 * max_reach;
+        let pos_y: f32 = center_y as f32 - self.direction.y.0 * max_reach;
+
+        Disc {
+            radius: self.inner_radius,
+            color: if self.is_clicked {
+                Color::RGB(125, 125, 125)
+            } else {
+                Color::RGB(175, 175, 175)
+            },
+        }
+        .draw_onto(
+            canvas,
+            texture_creator,
+            texture_cache,
+            DrawPosition::ScreenCoords {
+                x: pos_x as i32,
+                y: pos_y as i32,
+            },
+        )?;
+        Ok(())
+    }
+}
+
 enum PlayerControl {
     Gamepad(Joystick),
-    SideJoystick { id: u8, button: Keycode },
-    CenteredJoystick { button: Keycode },
+    SideJoystick(SideJoystickGUI),
+    CenteredJoystick { button: Scancode },
     RustFunction(fn(&Car, &Track) -> Vector),
     ExternalFunction,
     None,
@@ -1798,9 +1855,12 @@ impl Game {
                     accelerate: acceleration_pressed,
                 }
             }
-            PlayerControl::SideJoystick { id, button } => todo!(),
-            PlayerControl::CenteredJoystick { button } => todo!(),
-            PlayerControl::RustFunction(f) => todo!(),
+            PlayerControl::SideJoystick(joystick) => PlayerDecision {
+                direction: joystick.direction.normalized(),
+                accelerate: joystick.acceleration_pressed,
+            },
+            PlayerControl::CenteredJoystick { .. } => todo!(),
+            PlayerControl::RustFunction(_) => todo!(),
             PlayerControl::ExternalFunction => todo!(),
             PlayerControl::None => PlayerDecision {
                 direction: Vector::new(0., 0.),
@@ -1862,10 +1922,12 @@ const SIDE_PANEL_WIDTH: u32 = 400;
 const SCREEN_WIDTH: u32 = CAMERA_WIDTH + SIDE_PANEL_WIDTH;
 const SCREEN_HEIGHT: u32 = CAMERA_HEIGHT;
 
-const JOYSTICK_POSITION: (u32, u32) = (CAMERA_WIDTH + SIDE_PANEL_WIDTH / 2, CAMERA_HEIGHT / 3);
+const JOYSTICK_POSITION: (i16, i16) = (
+    CAMERA_WIDTH as i16 + SIDE_PANEL_WIDTH as i16 / 2,
+    CAMERA_HEIGHT as i16 / 3,
+);
 const JOYSTICK_INNER_RADIUS: f32 = 50.;
 const JOYSTICK_OUTER_RADIUS: f32 = 100.;
-const JOYSTICK_MAX_REACH_RADIUS: f32 = JOYSTICK_OUTER_RADIUS - 0.8 * JOYSTICK_INNER_RADIUS;
 
 const LN_100: f32 = 4.60517;
 const TIME_TO_99_PERC_SPEED: f32 = 5.; // in s
@@ -1948,10 +2010,12 @@ pub fn main() {
     // Initialize the Game
     let control = match joystick {
         Some(js) => PlayerControl::Gamepad(js),
-        None => PlayerControl::SideJoystick {
-            id: 0,
-            button: Keycode::Space,
-        },
+        None => PlayerControl::SideJoystick(SideJoystickGUI::new(
+            JOYSTICK_POSITION,
+            Scancode::Space,
+            JOYSTICK_INNER_RADIUS,
+            JOYSTICK_OUTER_RADIUS,
+        )),
     };
 
     let mut game: Game = Game::init_game(
@@ -1983,9 +2047,6 @@ pub fn main() {
     };
 
     let mut current_camera: usize = 0; // 0 for car_camera, 1 for fix_camera
-
-    // GUI
-    let mut joystick_gui_pressed: bool = false;
 
     // Initialize Font
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
@@ -2038,9 +2099,6 @@ pub fn main() {
         let time: time::Instant = time::Instant::now();
         let mut timestamps: Vec<u128> = Vec::new();
 
-        let mut acceleration_pressed: bool = false;
-        let mut joystick_direction: Vector = Vector::new(0.0, 0.0);
-
         // Read the events
         for event in event_pump.poll_iter() {
             match event {
@@ -2055,42 +2113,23 @@ pub fn main() {
                 } => {
                     current_camera = 1 - current_camera;
                 }
-                Event::MouseButtonDown {
-                    mouse_btn: MouseButton::Left,
-                    x,
-                    y,
-                    ..
-                } => {
-                    let dist_to_joystick: f32 = ((x - JOYSTICK_POSITION.0 as f32).powi(2)
-                        + (y - JOYSTICK_POSITION.1 as f32).powi(2))
-                    .sqrt();
-                    if dist_to_joystick < JOYSTICK_INNER_RADIUS {
-                        joystick_gui_pressed = true;
-                    }
-                }
-                Event::MouseButtonUp {
-                    mouse_btn: MouseButton::Left,
-                    ..
-                } => {
-                    joystick_gui_pressed = false;
-                }
                 _ => (),
             }
         }
 
         let keyboard_state: KeyboardState<'_> = event_pump.keyboard_state();
 
-        // Read mouse and keyboard output
-        let space_pressed: bool = keyboard_state.is_scancode_pressed(Scancode::Space);
-        acceleration_pressed |= space_pressed;
-        if joystick_gui_pressed {
-            let mouse_x: f32 = event_pump.mouse_state().x();
-            let mouse_y: f32 = event_pump.mouse_state().y();
-            let dx: f32 = mouse_x - JOYSTICK_POSITION.0 as f32;
-            let dy: f32 = mouse_y - JOYSTICK_POSITION.1 as f32;
-            joystick_direction = (1. / JOYSTICK_MAX_REACH_RADIUS) * Vector::new(dx, -dy);
-            if joystick_direction.norm().0 > 1.0 {
-                joystick_direction = joystick_direction.normalized();
+        let mouse_down = event_pump.mouse_state().left();
+        let mouse_pos = (event_pump.mouse_state().x(), event_pump.mouse_state().y());
+
+        for player in &mut game.players {
+            let player_control = &mut player.profile.control;
+            if let PlayerControl::SideJoystick(joystick) = player_control {
+                joystick.update(
+                    mouse_pos,
+                    mouse_down,
+                    keyboard_state.is_scancode_pressed(joystick.acceleration_key),
+                );
             }
         }
 
@@ -2270,16 +2309,14 @@ pub fn main() {
             .is_err();
 
         // Render the joystick
-        failed_rendering |= render_joystick(
-            JOYSTICK_POSITION,
-            joystick_direction,
-            acceleration_pressed,
-            &mut canvas,
-            &texture_creator,
-            &mut texture_cache,
-        )
-        .map_err(|e| eprintln!("Failed to render the joystick: {:?}", e))
-        .is_err();
+        for player in &game.players {
+            if let PlayerControl::SideJoystick(js) = &player.profile.control {
+                failed_rendering |= js
+                    .render(&mut canvas, &texture_creator, &mut texture_cache)
+                    .map_err(|e| eprintln!("Failed to render the joystick: {:?}", e))
+                    .is_err();
+            }
+        }
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());

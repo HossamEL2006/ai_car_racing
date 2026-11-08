@@ -965,25 +965,6 @@ enum DrawPosition<'cm> {
     RealCoords { camera: &'cm Camera },
 }
 
-// TODO: Delete this
-struct PositionedTexture<'tc> {
-    // 'tc is the lifetime of the texture creator
-    texture: Rc<render::Texture<'tc>>,
-    rect: rect::Rect,
-}
-
-impl<'tc> PositionedTexture<'tc> {
-    fn set_pos(&mut self, x: i32, y: i32) {
-        self.rect.set_x(x);
-        self.rect.set_y(y);
-    }
-
-    fn draw_onto<T: RenderTarget>(&self, canvas: &mut Canvas<T>) -> Result<(), sdl3::Error> {
-        canvas.copy(&self.texture, None, self.rect)?;
-        Ok(())
-    }
-}
-
 #[derive(Clone, Hash, Eq, PartialEq)]
 enum HashableGraphicProps {
     Circle {
@@ -1021,7 +1002,8 @@ trait CacheableGraphic {
     fn height(&self) -> u32;
     fn pixel_anchor(&self) -> (i32, i32);
     fn world_anchor(&self) -> Option<Coords>;
-    // only implement for graphics meant to be positioned base on world coordinates and camera
+    // only implement `world_anchor` for graphics meant to be positioned based on world coordinates
+
     // TODO: Leverage Rust's type system to enforce that world_anchor is only implemented for
     //       those graphics
 
@@ -1057,15 +1039,8 @@ trait CacheableGraphic {
         }
     }
 
-    fn get_positioned_texture<'tc, T>(
-        &self,
-        texture_creator: &'tc render::TextureCreator<T>,
-        texture_cache: &mut Option<TextureCache<'tc>>,
-        position: DrawPosition,
-    ) -> Result<PositionedTexture<'tc>, CacheableGraphicError> {
-        let texture = self.get_texture(texture_creator, texture_cache)?;
-        let query = texture.query();
-        let mut rect = rect::Rect::new(0, 0, query.width, query.height);
+    fn get_rect(&self, position: DrawPosition) -> Result<rect::Rect, CacheableGraphicError> {
+        let mut rect = rect::Rect::new(0, 0, self.width(), self.height());
 
         let (anchor_x, anchor_y) = self.pixel_anchor();
         match position {
@@ -1088,10 +1063,7 @@ trait CacheableGraphic {
             }
         }
 
-        Ok(PositionedTexture {
-            texture: Rc::clone(&texture),
-            rect,
-        })
+        Ok(rect)
     }
 
     fn draw_onto<'tc, T: RenderTarget, U>(
@@ -1104,10 +1076,10 @@ trait CacheableGraphic {
         if self.width() == 0 || self.height() == 0 {
             return Ok(());
         }
-        let positioned_texture =
-            self.get_positioned_texture(texture_creator, texture_cache, position)?;
-        positioned_texture
-            .draw_onto(canvas)
+        let texture = self.get_texture(texture_creator, texture_cache)?;
+        let rect = self.get_rect(position)?;
+        canvas
+            .copy(&texture, None, rect)
             .map_err(CacheableGraphicError::TextureCopy)?;
         Ok(())
     }

@@ -5,6 +5,7 @@ use sdl3::{
     render::{self, Canvas},
     video::Window,
 };
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::ops;
 
@@ -43,6 +44,12 @@ impl Meter {
 
     pub fn as_px_dist(&self, camera: &Camera) -> f32 {
         self.0 * camera.px_per_meter as f32
+    }
+}
+
+impl Debug for Meter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}m", self.0)
     }
 }
 
@@ -100,6 +107,12 @@ impl ops::Mul<Meter> for f32 {
 pub struct WorldCoords {
     x: Meter,
     y: Meter,
+}
+
+impl Debug for WorldCoords {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({:?}, {:?})", self.x, self.y)
+    }
 }
 
 impl WorldCoords {
@@ -239,6 +252,17 @@ impl ops::Add for WorldVector {
     }
 }
 
+impl ops::Neg for WorldVector {
+    type Output = WorldVector;
+
+    fn neg(self) -> Self::Output {
+        WorldVector {
+            x: -self.x,
+            y: -self.y,
+        }
+    }
+}
+
 // WorldCoords + WorldVector Operation
 impl ops::Add<WorldVector> for WorldCoords {
     type Output = WorldCoords;
@@ -266,7 +290,7 @@ impl ops::Mul<WorldVector> for f32 {
 // WorldPolygon
 // --------------------
 
-#[derive(Clone, Hash, Eq, PartialEq)]
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub struct WorldPolygon {
     vertices: Vec<WorldCoords>,
 }

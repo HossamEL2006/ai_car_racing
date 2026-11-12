@@ -1,13 +1,14 @@
-use std::hash::Hash;
-
+use crate::screen_graphic::{PolygonGUI, ScreenImmGraphic};
 use crate::texture_cache::{HashableGraphicProps, Hashf32, TextureCache};
 use crate::world_objects::{Camera, Meter, WorldCoords, WorldPolygon, WorldVector};
+use sdl3::render::{FPoint, FRect};
 use sdl3::{
     pixels::Color,
     rect,
     render::{Canvas, RenderTarget, Texture, TextureCreator},
     surface::Surface,
 };
+use std::hash::Hash;
 
 pub trait WorldGraphic {
     // this trait is for world objects (depending on the camera and unit distance `Meter`) that
@@ -56,10 +57,12 @@ pub trait CacheableWorldGraphic<HashType: Hash + Eq>: SizedWorldGraphic {
         )
         .map_err(|_| ())?;
 
+        // center the camera on the canvas
         let camera_pos = self.anchor()
-            + 0.5
-                * (WorldCoords::new(self.right_width(), self.top_height())
-                    - WorldCoords::new(self.width(), self.height()));
+            + WorldVector::new(
+                0.5 * self.width() - self.left_width(),
+                -(0.5 * self.height() - self.top_height()),
+            );
 
         self.render_onto(
             &Camera::new(
@@ -73,8 +76,11 @@ pub trait CacheableWorldGraphic<HashType: Hash + Eq>: SizedWorldGraphic {
         .map_err(|_| ())?;
 
         let texture = texture_creator
-            .create_texture_from_surface(canvas.surface())
+            .create_texture_from_surface(canvas.into_surface())
             .map_err(|_| ())?;
+        // 3 hours of debugging to figure out that it should have been `into_surface()` instead
+        // of `surface()`
+        // TODO : Figure out the difference between `into_surface()` and `surface()`
 
         Ok(texture)
     }
@@ -98,13 +104,41 @@ pub trait CacheableWorldGraphic<HashType: Hash + Eq>: SizedWorldGraphic {
         texture_cache: &mut TextureCache<'tc, HashType>,
     ) -> Result<(), ()> {
         let hash = self.hash_props(camera.px_per_meter());
+        let top_left_fpoint = (WorldCoords::new(
+            self.anchor().x() - self.left_width(),
+            self.anchor().y() - self.top_height(),
+        ))
+        .as_fpoint(camera);
         if let Some(texture) = texture_cache.get_cached(&hash) {
-            // TODO : Copy texture into the correct position based on the camera
-            canvas.copy(&texture, None, None).map_err(|_| ())?;
+            let query = texture.query();
+            canvas
+                .copy(
+                    &texture,
+                    None,
+                    Some(FRect::new(
+                        top_left_fpoint.x,
+                        top_left_fpoint.y,
+                        query.width as f32,
+                        query.height as f32,
+                    )),
+                )
+                .map_err(|_| ())?;
         } else {
             self.cache(camera.px_per_meter(), texture_creator, texture_cache)?;
             let texture = texture_cache.get_cached(&hash).ok_or(())?;
-            canvas.copy(&texture, None, None).map_err(|_| ())?;
+            let query = texture.query();
+            canvas
+                .copy(
+                    &texture,
+                    None,
+                    Some(FRect::new(
+                        top_left_fpoint.x,
+                        top_left_fpoint.y,
+                        query.width as f32,
+                        query.height as f32,
+                    )),
+                )
+                .map_err(|_| ())?;
         }
         Ok(())
     }
@@ -186,26 +220,43 @@ impl WorldGraphic for WorldPolygonGraphic {
         canvas: &mut Canvas<T>,
     ) -> Result<(), sdl3::Error> {
         canvas.set_draw_color(self.color);
-        // TODO : Implement polygon rendering
+
+        let top_left_point =
+            WorldCoords::new(self.polygon.min_x(), self.polygon.max_y()).as_fpoint(camera);
+        let fpoints = self
+            .polygon
+            .vertices()
+            .iter()
+            .map(|coord| coord.as_fpoint(camera))
+            .map(|fpoint| FPoint::new(fpoint.x - top_left_point.x, fpoint.y - top_left_point.y))
+            .collect::<Vec<_>>();
+
+        let polygon_gui = PolygonGUI::new(fpoints, self.color, self.filled);
+        polygon_gui.render_onto(canvas, (top_left_point.x as i32, top_left_point.y as i32))?;
+
         Ok(())
     }
 }
 
 impl SizedWorldGraphic for WorldPolygonGraphic {
     fn left_width(&self) -> Meter {
-        Meter::new(self.polygon.min_x().value().abs())
+        Meter::new(0.)
     }
+
     fn right_width(&self) -> Meter {
-        Meter::new(self.polygon.max_x().value().abs())
+        self.polygon.width()
     }
+
     fn top_height(&self) -> Meter {
-        Meter::new(self.polygon.max_y().value().abs())
+        Meter::new(0.)
     }
+
     fn bottom_height(&self) -> Meter {
-        Meter::new(self.polygon.min_y().value().abs())
+        self.polygon.height()
     }
+
     fn anchor(&self) -> WorldCoords {
-        WorldCoords::origin()
+        WorldCoords::new(self.polygon.min_x(), self.polygon.max_y())
     }
 }
 
@@ -220,92 +271,3 @@ impl CacheableWorldGraphic<HashableGraphicProps> for WorldPolygonGraphic {
         }
     }
 }
-
-// impl WorldGraphic for WorldGPolygon {
-//     fn render_onto(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
-//         if !self.filled {
-//             let mut fpoints: Vec<render::FPoint> = self
-//                 .polygon
-//                 .vertices
-//                 .iter()
-//                 .map(|coord: &WorldCoords| coord.as_fpoint(camera))
-//                 .collect();
-//             fpoints.push(self.polygon.vertices[0].as_fpoint(camera));
-//             canvas.draw_lines(fpoints.as_slice())
-//         } else {
-//             canvas.set_draw_color(self.color);
-
-//             let fpoints: Vec<render::FPoint> = self
-//                 .polygon
-//                 .vertices
-//                 .iter()
-//                 .map(|coord| coord.as_fpoint(camera))
-//                 .collect();
-
-//             if fpoints.len() < 3 {
-//                 return Ok(());
-//             }
-
-//             // Get canvas size for clipping bounds
-//             let (canvas_w, canvas_h) = canvas.output_size()?;
-
-//             // Find vertical bounds clamped to screen dimensions
-//             let y_min = fpoints
-//                 .iter()
-//                 .map(|p| p.y)
-//                 .fold(f32::MAX, f32::min)
-//                 .max(0.0) as i32;
-//             let y_max = fpoints
-//                 .iter()
-//                 .map(|p| p.y)
-//                 .fold(f32::MIN, f32::max)
-//                 .min(canvas_h as f32 - 1.0) as i32;
-
-//             if y_min > y_max {
-//                 return Ok(());
-//             }
-
-//             let n = fpoints.len();
-
-//             // Process row by row (scanline)
-//             for y in y_min..=y_max {
-//                 let y_f = y as f32;
-//                 let mut intersections = Vec::new();
-
-//                 // Find all edge intersections with the current scanline y
-//                 let mut j = n - 1;
-//                 for i in 0..n {
-//                     let p1 = fpoints[j];
-//                     let p2 = fpoints[i];
-
-//                     // Check if edge crosses the scanline y (half-open interval rule avoids duplication)
-//                     if (p1.y <= y_f && p2.y > y_f) || (p2.y <= y_f && p1.y > y_f) {
-//                         let x = p1.x + (y_f - p1.y) * (p2.x - p1.x) / (p2.y - p1.y);
-//                         intersections.push(x);
-//                     }
-//                     j = i;
-//                 }
-
-//                 // Sort intersections from left to right
-//                 intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-//                 // Draw horizontal spans between pairs of intersections (even-odd rule)
-//                 let mut i = 0;
-//                 while i + 1 < intersections.len() {
-//                     let x_start = intersections[i].max(0.0) as i32;
-//                     let x_end = intersections[i + 1].min(canvas_w as f32 - 1.0) as i32;
-
-//                     if x_start <= x_end {
-//                         canvas.draw_line(
-//                             render::FPoint::new(x_start as f32, y_f),
-//                             render::FPoint::new(x_end as f32, y_f),
-//                         )?;
-//                     }
-//                     i += 2;
-//                 }
-//             }
-
-//             Ok(())
-//         }
-//     }
-// }

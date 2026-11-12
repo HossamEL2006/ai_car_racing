@@ -1,7 +1,7 @@
 use crate::texture_cache::{HashableGraphicProps, Hashf32, TextureCache};
 use sdl3::{
     pixels::{Color, PixelFormat},
-    render::{self, Canvas, RenderTarget},
+    render::{self, Canvas, FPoint, RenderTarget},
     surface::Surface,
     ttf,
 };
@@ -302,5 +302,147 @@ impl<'ft, 'tcontext> SizedScreenGraphic for TextGUI<'ft, 'tcontext> {
             .blended(self.color)
             .unwrap();
         surface.height()
+    }
+}
+
+pub struct PolygonGUI {
+    vertices: Vec<FPoint>,
+    color: Color,
+    filled: bool,
+}
+
+impl PolygonGUI {
+    pub fn new(vertices: Vec<FPoint>, color: Color, filled: bool) -> Self {
+        Self {
+            vertices,
+            color,
+            filled,
+        }
+    }
+}
+
+impl ScreenImmGraphic for PolygonGUI {
+    fn render_onto<T: RenderTarget>(
+        &self,
+        canvas: &mut Canvas<T>,
+        top_left_pos: (i32, i32),
+    ) -> Result<(), sdl3::Error> {
+        if !self.filled {
+            let mut cyclic_shifted_fpoints = self
+                .vertices
+                .iter()
+                .map(|v| render::FPoint {
+                    x: v.x + top_left_pos.0 as f32,
+                    y: v.y + top_left_pos.1 as f32,
+                })
+                .collect::<Vec<_>>();
+            cyclic_shifted_fpoints.push(render::FPoint {
+                x: self.vertices[0].x + top_left_pos.0 as f32,
+                y: self.vertices[0].y + top_left_pos.1 as f32,
+            });
+
+            canvas.draw_lines(cyclic_shifted_fpoints.as_slice())
+        } else {
+            canvas.set_draw_color(self.color);
+
+            let shifted_fpoints: Vec<render::FPoint> = self
+                .vertices
+                .iter()
+                .map(|v| render::FPoint {
+                    x: v.x + top_left_pos.0 as f32,
+                    y: v.y + top_left_pos.1 as f32,
+                })
+                .collect::<Vec<_>>();
+
+            if shifted_fpoints.len() < 3 {
+                return Ok(());
+            }
+
+            // Get canvas size for clipping bounds
+            let (canvas_w, canvas_h) = canvas.output_size()?;
+
+            // Find vertical bounds clamped to screen dimensions
+            let y_min = shifted_fpoints
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::MAX, f32::min)
+                .max(0.0) as i32;
+            let y_max = shifted_fpoints
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::MIN, f32::max)
+                .min(canvas_h as f32 - 1.0) as i32;
+
+            if y_min > y_max {
+                return Ok(());
+            }
+
+            let n = shifted_fpoints.len();
+
+            // Process row by row (scanline)
+            for y in y_min..=y_max {
+                let y_f = y as f32;
+                let mut intersections = Vec::new();
+
+                // Find all edge intersections with the current scanline y
+                let mut j = n - 1;
+                for i in 0..n {
+                    let p1 = shifted_fpoints[j];
+                    let p2 = shifted_fpoints[i];
+
+                    // Check if edge crosses the scanline y (half-open interval rule avoids duplication)
+                    if (p1.y <= y_f && p2.y > y_f) || (p2.y <= y_f && p1.y > y_f) {
+                        let x = p1.x + (y_f - p1.y) * (p2.x - p1.x) / (p2.y - p1.y);
+                        intersections.push(x);
+                    }
+                    j = i;
+                }
+
+                // Sort intersections from left to right
+                intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Draw horizontal spans between pairs of intersections (even-odd rule)
+                let mut i = 0;
+                while i + 1 < intersections.len() {
+                    let x_start = intersections[i].max(0.0) as i32;
+                    let x_end = intersections[i + 1].min(canvas_w as f32 - 1.0) as i32;
+
+                    if x_start <= x_end {
+                        canvas.draw_line(
+                            render::FPoint::new(x_start as f32, y_f),
+                            render::FPoint::new(x_end as f32, y_f),
+                        )?;
+                    }
+                    i += 2;
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+impl SizedScreenGraphic for PolygonGUI {
+    fn width(&self) -> u32 {
+        self.vertices.iter().map(|v| v.x).fold(f32::MIN, f32::max) as u32
+    }
+
+    fn height(&self) -> u32 {
+        self.vertices.iter().map(|v| v.y).fold(f32::MIN, f32::max) as u32
+    }
+}
+
+impl ScreenTexture for PolygonGUI {
+    fn generate_texture<'tc, U>(
+        &self,
+        texture_creator: &'tc render::TextureCreator<U>,
+    ) -> Result<render::Texture<'tc>, ()> {
+        derive_texture(self, texture_creator)
+    }
+}
+
+impl CacheableScreenGraphic<String> for PolygonGUI {
+    fn hash_props(&self) -> String {
+        format!("{:?}", self.vertices)
     }
 }

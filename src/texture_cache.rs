@@ -1,8 +1,8 @@
-use std::{collections::HashMap, rc::Rc};
-
 use crate::world_objects::WorldPolygon;
 use sdl3::{pixels::Color, render::Texture};
+use std::fmt::Debug;
 use std::hash::Hash;
+use std::{collections::HashMap, rc::Rc};
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
 pub struct Hashf32(u32);
@@ -14,6 +14,12 @@ impl Hashf32 {
 
     pub fn value(&self) -> f32 {
         f32::from_bits(self.0)
+    }
+}
+
+impl Debug for Hashf32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value())
     }
 }
 
@@ -54,7 +60,7 @@ pub struct TextureCache<'tc, HashType> {
 }
 
 impl<'tc, HashType: Hash + Eq> TextureCache<'tc, HashType> {
-    pub fn init() -> TextureCache<'tc, HashType> {
+    pub fn new() -> TextureCache<'tc, HashType> {
         Self {
             texture_cache: HashMap::new(),
         }
@@ -66,5 +72,18 @@ impl<'tc, HashType: Hash + Eq> TextureCache<'tc, HashType> {
 
     pub fn get_cached(&self, hash: &HashType) -> Option<Rc<Texture<'tc>>> {
         self.texture_cache.get(hash).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.texture_cache.len()
+    }
+}
+
+impl<'tc, HashType: Hash + Eq + Debug> Debug for TextureCache<'tc, HashType> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // debug a list of HashTypes
+        f.debug_struct("TextureCache")
+            .field("hashes", &self.texture_cache.keys().collect::<Vec<_>>())
+            .finish()
     }
 }

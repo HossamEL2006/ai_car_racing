@@ -12,7 +12,7 @@ use sdl3::{
     keyboard::{KeyboardState, Keycode, Scancode},
     pixels::Color,
     render::{self, Canvas, RenderTarget},
-    ttf::{self, Text},
+    ttf::{self},
     video::{Window, WindowContext},
 };
 use std::{
@@ -128,12 +128,11 @@ impl Car {
         for (mut polygon, color) in self.car_polys.clone() {
             for vertex in polygon.vertices_mut() {
                 // rotate around origin to match car's direction vector
-                let angle = self.direction_vec.angle();
-                // TODO : Investigate of this stil works correctly since x.atan2(y) was replace
-                //        with y.atan2(x)
-                let cos_angle = angle.cos();
-                let sin_angle = angle.sin();
-                let rotated_x = cos_angle * vertex.x().value() - sin_angle * vertex.y().value();
+                let angle_to_origin = self.direction_vec.angle();
+                let angle_to_vertical_pos = angle_to_origin - std::f32::consts::FRAC_PI_2;
+                let cos_angle = angle_to_vertical_pos.cos();
+                let sin_angle = angle_to_vertical_pos.sin();
+                let rotated_x = sin_angle * vertex.y().value() - cos_angle * vertex.x().value();
                 let rotated_y = sin_angle * vertex.x().value() + cos_angle * vertex.y().value();
                 *vertex = WorldCoords::new(Meter::new(rotated_x), Meter::new(-rotated_y));
                 *vertex = self.coords + (*vertex - WorldCoords::origin());
@@ -755,8 +754,8 @@ impl Game {
             PlayerControl::RustFunction(_) => todo!(),
             PlayerControl::ExternalFunction => todo!(),
             PlayerControl::None => PlayerDecision {
-                direction: WorldVector::zero(),
-                accelerate: false,
+                direction: WorldVector::new(Meter::new(0.), Meter::new(1.)),
+                accelerate: true, // TODO : revert
             },
         }
     }
@@ -827,9 +826,9 @@ const THEORETICAL_MAX_SPEED: f32 = 100.; // in m/s
 const FRICTION_FACTOR: f32 = LN_100 / TIME_TO_99_PERC_SPEED;
 const ENGINE_ACCELERATION: f32 = THEORETICAL_MAX_SPEED * FRICTION_FACTOR;
 
-const N_ANCHORS: usize = 10;
+const N_ANCHORS: usize = 8;
 const MEAN_ANCHOR_RADIUS: f32 = 120.;
-const STDEV_ANCHOR_RADIUS: f32 = 55.;
+const STDEV_ANCHOR_RADIUS: f32 = 50.;
 const STDEV_SUBANCHOR_ANGLE_DEV: f32 = (360. / N_ANCHORS as f32) / 3.0;
 const POINTS_PER_BEZIER_CURVE: usize = 15;
 const PATH_WIDTH: f32 = 15.0;
@@ -902,12 +901,13 @@ pub fn main() {
     // Initialize the Game
     let control = match joystick {
         Some(js) => PlayerControl::Gamepad(js),
-        None => PlayerControl::SideJoystick(SideJoystickGUI::new(
-            JOYSTICK_POSITION,
-            Scancode::Space,
-            JOYSTICK_INNER_RADIUS,
-            JOYSTICK_OUTER_RADIUS,
-        )),
+        // None => PlayerControl::SideJoystick(SideJoystickGUI::new(
+        //     JOYSTICK_POSITION,
+        //     Scancode::Space,
+        //     JOYSTICK_INNER_RADIUS,
+        //     JOYSTICK_OUTER_RADIUS,
+        // )),
+        None => PlayerControl::None, // TODO : revert
     };
 
     let mut game: Game = Game::init_game(
@@ -950,7 +950,7 @@ pub fn main() {
     //       functions rether than always including both the texture creator and the cache
     //       separately. And it could also remove the need to alway have a visible variable of type
     //       Option<TextureCache> circulating in the main function.
-    let mut texture_cache: TextureCache<HashableGraphicProps> = TextureCache::init();
+    let mut texture_cache: TextureCache<HashableGraphicProps> = TextureCache::new();
 
     // Render text textures
     let hold_space_text = TextGUI::new(
@@ -1072,7 +1072,7 @@ pub fn main() {
         failed_rendering |= game
             .track
             .circuit_polygon
-            .as_graphic(true, Color::RGB(10, 70, 10))
+            .as_graphic(true, Color::RGB(80, 80, 80))
             .cached_render_onto(
                 current_camera,
                 &mut canvas,
@@ -1279,6 +1279,6 @@ pub fn main() {
             println!();
         }
 
-        // println!("{}", texture_cache.as_ref().unwrap().texture_cache.len());
+        // println!("{}", texture_cache.len());
     }
 }

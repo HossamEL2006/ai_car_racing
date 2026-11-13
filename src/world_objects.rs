@@ -10,23 +10,6 @@ use std::hash::Hash;
 use std::ops;
 
 // --------------------
-// Hash Float
-// --------------------
-
-#[derive(Clone, Copy, Hash, Eq, PartialEq)]
-struct Hashf32(u32);
-
-impl Hashf32 {
-    fn new(value: f32) -> Self {
-        Self(value.to_bits())
-    }
-
-    fn value(&self) -> f32 {
-        f32::from_bits(self.0)
-    }
-}
-
-// --------------------
 // Meter
 // --------------------
 
@@ -205,7 +188,12 @@ impl WorldVector {
     }
 
     pub fn normalized(&self) -> WorldVector {
-        self.norm().0.recip() * *self
+        let norm = self.norm().value();
+        if norm == 0. {
+            WorldVector::zero()
+        } else {
+            norm.recip() * *self
+        }
     }
 
     pub fn rotated(&self, theta: f32) -> WorldVector {
@@ -221,7 +209,7 @@ impl WorldVector {
         }
     }
 
-    pub fn into_graphic(&self, base: WorldCoords, color: Color) -> WorldVectorGraphic {
+    pub fn as_graphic(&self, base: WorldCoords, color: Color) -> WorldVectorGraphic {
         WorldVectorGraphic {
             base,
             vector: *self,

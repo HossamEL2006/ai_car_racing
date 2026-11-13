@@ -3,6 +3,13 @@ mod texture_cache;
 mod world_graphic;
 mod world_objects;
 
+use crate::{
+    screen_graphic::{
+        CacheableScreenGraphic, CircleGUI, DiscGUI, SizedScreenGraphic, TextFont, TextGUI,
+    },
+    texture_cache::{HashableGraphicProps, TextureCache},
+    world_graphic::{CacheableWorldGraphic, WorldGraphic},
+};
 use core::f32;
 use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
@@ -22,12 +29,6 @@ use std::{
 };
 use svg::{node::element::tag, parser};
 use world_objects::*;
-
-use crate::{
-    screen_graphic::{CacheableScreenGraphic, SizedScreenGraphic, TextFont, TextGUI},
-    texture_cache::{HashableGraphicProps, TextureCache},
-    world_graphic::{CacheableWorldGraphic, WorldGraphic},
-};
 
 struct Car {
     coords: WorldCoords,
@@ -145,42 +146,55 @@ impl Car {
         Ok(())
     }
 
-    fn render_debug_vectors(
+    fn render_debug_vectors<'tc, U>(
         &self,
         camera: &Camera,
         canvas: &mut Canvas<Window>,
-    ) -> Result<(), sdl3::Error> {
+        font: &TextFont,
+        texture_creator: &'tc render::TextureCreator<U>,
+        texture_cache: &mut TextureCache<'tc, HashableGraphicProps>,
+    ) -> Result<(), ()> {
         // fun fact :
         // Implementing a text caching system made this function around 40 times faster
-
         let debug_scalar: f32 = 0.3;
         let base_point: WorldCoords = self.coords;
         let friction_acc = -self.friction_factor * self.velocity;
-        let gvectors = [
+        let vectors = [
+            ((debug_scalar * self.velocity), Color::RGB(255, 0, 0), "v"),
             (
-                (debug_scalar * self.velocity).into_graphic(base_point, Color::RGB(255, 0, 0)),
-                "v",
-            ),
-            (
-                (debug_scalar.powi(2) * self.engine_acc)
-                    .into_graphic(base_point, Color::RGB(0, 0, 255)),
+                (debug_scalar.powi(2) * self.engine_acc),
+                Color::RGB(0, 0, 255),
                 "p",
             ),
             (
-                (debug_scalar.powi(2) * friction_acc)
-                    .into_graphic(base_point, Color::RGB(0, 255, 0)),
+                (debug_scalar.powi(2) * friction_acc),
+                Color::RGB(0, 255, 0),
                 "f",
             ),
             (
-                (debug_scalar.powi(2) * (self.engine_acc + friction_acc))
-                    .into_graphic(base_point, Color::RGB(255, 255, 0)),
+                (debug_scalar.powi(2) * (self.engine_acc + friction_acc)),
+                Color::RGB(255, 255, 0),
                 "a",
             ),
         ];
 
-        for (gvector, label) in gvectors {
-            // TODO: Implement label rendering
-            gvector.render_onto(camera, canvas)?;
+        for (vector, color, label) in vectors {
+            let gvector = vector.as_graphic(base_point, color);
+            let tip_point = (base_point + vector).as_point(camera);
+            let tip_x = tip_point.x;
+            let tip_y = tip_point.y;
+            let vector_length_px = vector.norm().as_px_dist(camera);
+            if vector_length_px > 10. {
+                TextGUI::new(label, font, Color::RGB(255, 255, 255)).cached_render_onto(
+                    canvas,
+                    texture_creator,
+                    texture_cache,
+                    (tip_x, tip_y - 20),
+                )?;
+            }
+            if vector_length_px > 2. {
+                gvector.render_onto(camera, canvas).map_err(|_| ())?;
+            }
         }
         Ok(())
     }
@@ -516,11 +530,6 @@ fn parse_color(color_str: &str) -> Option<Color> {
     }
 }
 
-enum DrawPosition<'cm> {
-    ScreenCoords { x: i32, y: i32 },
-    RealCoords { camera: &'cm Camera },
-}
-
 struct SideJoystickGUI {
     position: (i16, i16),
     is_clicked: bool,
@@ -585,44 +594,42 @@ impl SideJoystickGUI {
         texture_creator: &'tc render::TextureCreator<U>,
         texture_cache: &mut TextureCache<'tc, HashableGraphicProps>,
     ) -> Result<(), ()> {
-        todo!();
-        // let (center_x, center_y) = self.position;
-        // GUICircle {
-        //     radius: self.outer_radius,
-        //     color: Color::RGB(200, 200, 200),
-        // }
-        // .draw_onto(
-        //     canvas,
-        //     texture_creator,
-        //     texture_cache,
-        //     DrawPosition::ScreenCoords {
-        //         x: center_x as i32,
-        //         y: center_y as i32,
-        //     },
-        // )?;
+        let (center_x, center_y) = self.position;
+        CircleGUI::new(self.outer_radius, Color::RGB(200, 200, 200))
+            .cached_render_onto(
+                canvas,
+                texture_creator,
+                texture_cache,
+                (
+                    center_x as i32 - self.outer_radius as i32,
+                    center_y as i32 - self.outer_radius as i32,
+                ),
+            )
+            .map_err(|_| ())?;
 
-        // let max_reach = self.outer_radius - 0.8 * self.inner_radius;
-        // let pos_x: f32 = center_x as f32 + self.direction.x.0 * max_reach;
-        // let pos_y: f32 = center_y as f32 - self.direction.y.0 * max_reach;
+        let max_reach = self.outer_radius - 0.8 * self.inner_radius;
+        let pos_x: f32 = center_x as f32 + self.direction.x().value() * max_reach;
+        let pos_y: f32 = center_y as f32 - self.direction.y().value() * max_reach;
 
-        // GUIDisc {
-        //     radius: self.inner_radius,
-        //     color: if self.is_clicked {
-        //         Color::RGB(125, 125, 125)
-        //     } else {
-        //         Color::RGB(175, 175, 175)
-        //     },
-        // }
-        // .draw_onto(
-        //     canvas,
-        //     texture_creator,
-        //     texture_cache,
-        //     DrawPosition::ScreenCoords {
-        //         x: pos_x as i32,
-        //         y: pos_y as i32,
-        //     },
-        // )?;
-        // Ok(())
+        DiscGUI::new(
+            self.inner_radius,
+            if self.is_clicked {
+                Color::RGB(125, 125, 125)
+            } else {
+                Color::RGB(175, 175, 175)
+            },
+        )
+        .cached_render_onto(
+            canvas,
+            texture_creator,
+            texture_cache,
+            (
+                pos_x as i32 - self.inner_radius as i32,
+                pos_y as i32 - self.inner_radius as i32,
+            ),
+        )
+        .map_err(|_| ())?;
+        Ok(())
     }
 }
 
@@ -754,8 +761,8 @@ impl Game {
             PlayerControl::RustFunction(_) => todo!(),
             PlayerControl::ExternalFunction => todo!(),
             PlayerControl::None => PlayerDecision {
-                direction: WorldVector::new(Meter::new(0.), Meter::new(1.)),
-                accelerate: true, // TODO : revert
+                direction: WorldVector::zero(),
+                accelerate: false,
             },
         }
     }
@@ -901,13 +908,12 @@ pub fn main() {
     // Initialize the Game
     let control = match joystick {
         Some(js) => PlayerControl::Gamepad(js),
-        // None => PlayerControl::SideJoystick(SideJoystickGUI::new(
-        //     JOYSTICK_POSITION,
-        //     Scancode::Space,
-        //     JOYSTICK_INNER_RADIUS,
-        //     JOYSTICK_OUTER_RADIUS,
-        // )),
-        None => PlayerControl::None, // TODO : revert
+        None => PlayerControl::SideJoystick(SideJoystickGUI::new(
+            JOYSTICK_POSITION,
+            Scancode::Space,
+            JOYSTICK_INNER_RADIUS,
+            JOYSTICK_OUTER_RADIUS,
+        )),
     };
 
     let mut game: Game = Game::init_game(
@@ -1128,7 +1134,13 @@ pub fn main() {
             for player in &game.players {
                 failed_rendering |= &player
                     .car
-                    .render_debug_vectors(current_camera, &mut canvas)
+                    .render_debug_vectors(
+                        current_camera,
+                        &mut canvas,
+                        &text_font,
+                        &texture_creator,
+                        &mut texture_cache,
+                    )
                     .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
                     .is_err();
             }

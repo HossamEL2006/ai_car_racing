@@ -145,8 +145,7 @@ pub trait CacheableWorldGraphic<HashType: Hash + Eq>: SizedWorldGraphic {
 }
 
 // TODO: Design a way to merge between the cacheable and quick version of different graphics
-//       Consider seperating the Graphic trait and the Cacheable trait
-//       Consider automating anchor definition (some system that will infer the anchor's position)
+//       Make the anchor system for world graphics more intuitive
 pub struct WorldVectorGraphic {
     pub(crate) base: WorldCoords,
     pub(crate) vector: WorldVector,

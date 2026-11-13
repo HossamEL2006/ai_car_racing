@@ -62,7 +62,7 @@ pub trait CacheableScreenGraphic<HashType: Hash + Eq>: ScreenTexture {
         canvas: &mut Canvas<T>,
         texture_creator: &'tc render::TextureCreator<U>,
         texture_cache: &mut TextureCache<'tc, HashType>,
-        position: (i32, i32),
+        top_left_pos: (i32, i32),
     ) -> Result<(), ()> {
         let hash = self.hash_props();
         if let Some(texture) = texture_cache.get_cached(&hash) {
@@ -72,8 +72,8 @@ pub trait CacheableScreenGraphic<HashType: Hash + Eq>: ScreenTexture {
                     &texture,
                     None,
                     Some(render::FRect::new(
-                        position.0 as f32,
-                        position.1 as f32,
+                        top_left_pos.0 as f32,
+                        top_left_pos.1 as f32,
                         query.width as f32,
                         query.height as f32,
                     )),
@@ -90,8 +90,8 @@ pub trait CacheableScreenGraphic<HashType: Hash + Eq>: ScreenTexture {
                     &texture,
                     None,
                     Some(render::FRect::new(
-                        position.0 as f32,
-                        position.1 as f32,
+                        top_left_pos.0 as f32,
+                        top_left_pos.1 as f32,
                         query.width as f32,
                         query.height as f32,
                     )),
@@ -107,12 +107,19 @@ pub struct CircleGUI {
     color: Color,
 }
 
+impl CircleGUI {
+    pub fn new(radius: f32, color: Color) -> Self {
+        Self { radius, color }
+    }
+}
+
 impl ScreenImmGraphic for CircleGUI {
     fn render_onto<T: RenderTarget>(
         &self,
         canvas: &mut Canvas<T>,
         top_left_pos: (i32, i32),
     ) -> Result<(), sdl3::Error> {
+        canvas.set_draw_color(self.color);
         let (x, y) = top_left_pos;
         let radius = self.radius;
         for i in 0..36 {
@@ -164,12 +171,19 @@ pub struct DiscGUI {
     color: Color,
 }
 
+impl DiscGUI {
+    pub fn new(radius: f32, color: Color) -> Self {
+        Self { radius, color }
+    }
+}
+
 impl ScreenImmGraphic for DiscGUI {
     fn render_onto<T: RenderTarget>(
         &self,
         canvas: &mut Canvas<T>,
         top_left_pos: (i32, i32),
     ) -> Result<(), sdl3::Error> {
+        canvas.set_draw_color(self.color);
         let (x, y) = top_left_pos;
         let radius = self.radius;
         for i in -(radius as i16)..=(radius as i16) {

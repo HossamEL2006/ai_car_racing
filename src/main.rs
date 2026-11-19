@@ -14,6 +14,7 @@ use core::f32;
 use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 use sdl3::{
+    EventPump,
     event::Event,
     joystick::Joystick,
     keyboard::{KeyboardState, Keycode, Scancode},
@@ -558,8 +559,14 @@ impl SideJoystickGUI {
         }
     }
 
-    fn update(&mut self, mouse_position: (f32, f32), mouse_down: bool, acceleration_pressed: bool) {
-        self.acceleration_pressed = acceleration_pressed;
+    fn update(&mut self, event_pump: &EventPump) {
+        self.acceleration_pressed = event_pump
+            .keyboard_state()
+            .is_scancode_pressed(self.acceleration_key);
+
+        let mouse_state = event_pump.mouse_state();
+        let mouse_position = (mouse_state.x(), mouse_state.y());
+        let mouse_down = mouse_state.left();
 
         if mouse_down {
             let dist_to_joystick: f32 = ((mouse_position.0 - self.position.0 as f32).powi(2)
@@ -633,10 +640,40 @@ impl SideJoystickGUI {
     }
 }
 
+struct CenteredJoystick {
+    screen_center_pos: (f32, f32),
+    button: Scancode,
+    direction: WorldVector,
+    acceleration_pressed: bool,
+}
+
+impl CenteredJoystick {
+    fn new(screen_center_pos: (f32, f32), button: Scancode) -> Self {
+        Self {
+            screen_center_pos,
+            button,
+            direction: WorldVector::zero(),
+            acceleration_pressed: false,
+        }
+    }
+
+    fn update(&mut self, event_pump: &EventPump) {
+        let keyboard_state = KeyboardState::new(event_pump);
+        let button_pressed = keyboard_state.is_scancode_pressed(self.button);
+        let mouse_pos = (event_pump.mouse_state().x(), event_pump.mouse_state().y());
+        let direction = WorldVector::new(
+            Meter::new(mouse_pos.0 - self.screen_center_pos.0),
+            Meter::new(self.screen_center_pos.1 - mouse_pos.1),
+        );
+        self.direction = direction.normalized();
+        self.acceleration_pressed = button_pressed;
+    }
+}
+
 enum PlayerControl {
     Gamepad(Joystick),
     SideJoystick(SideJoystickGUI),
-    CenteredJoystick { button: Scancode },
+    CenteredJoystick(CenteredJoystick),
     RustFunction(fn(&Car, &Track) -> WorldVector),
     ExternalFunction,
     None,
@@ -757,7 +794,10 @@ impl Game {
                 direction: joystick.direction.normalized(),
                 accelerate: joystick.acceleration_pressed,
             },
-            PlayerControl::CenteredJoystick { .. } => todo!(),
+            PlayerControl::CenteredJoystick(centered_joystick) => PlayerDecision {
+                direction: centered_joystick.direction.normalized(),
+                accelerate: centered_joystick.acceleration_pressed,
+            },
             PlayerControl::RustFunction(_) => todo!(),
             PlayerControl::ExternalFunction => todo!(),
             PlayerControl::None => PlayerDecision {
@@ -908,12 +948,16 @@ pub fn main() {
     // Initialize the Game
     let control = match joystick {
         Some(js) => PlayerControl::Gamepad(js),
-        None => PlayerControl::SideJoystick(SideJoystickGUI::new(
-            JOYSTICK_POSITION,
+        None => PlayerControl::CenteredJoystick(CenteredJoystick::new(
+            (CAMERA_WIDTH as f32 / 2., CAMERA_HEIGHT as f32 / 2.),
             Scancode::Space,
-            JOYSTICK_INNER_RADIUS,
-            JOYSTICK_OUTER_RADIUS,
         )),
+        // None => PlayerControl::SideJoystick(SideJoystickGUI::new(
+        //     JOYSTICK_POSITION,
+        //     Scancode::Space,
+        //     JOYSTICK_INNER_RADIUS,
+        //     JOYSTICK_OUTER_RADIUS,
+        // )),
     };
 
     let mut game: Game = Game::init_game(
@@ -1010,19 +1054,12 @@ pub fn main() {
             }
         }
 
-        let keyboard_state: KeyboardState<'_> = event_pump.keyboard_state();
-
-        let mouse_down = event_pump.mouse_state().left();
-        let mouse_pos = (event_pump.mouse_state().x(), event_pump.mouse_state().y());
-
         for player in &mut game.players {
             let player_control = &mut player.profile.control;
             if let PlayerControl::SideJoystick(joystick) = player_control {
-                joystick.update(
-                    mouse_pos,
-                    mouse_down,
-                    keyboard_state.is_scancode_pressed(joystick.acceleration_key),
-                );
+                joystick.update(&event_pump);
+            } else if let PlayerControl::CenteredJoystick(centered_joystick) = player_control {
+                centered_joystick.update(&event_pump);
             }
         }
 

@@ -7,12 +7,11 @@ mod world_graphic;
 mod world_objects;
 
 use crate::{
-    game::Game,
+    game::{Game, PlayerDecision},
     screen_graphic::{
         CacheableScreenGraphic, CircleGUI, DiscGUI, SizedScreenGraphic, TextFont, TextGUI,
     },
     texture_cache::{HashableGraphicProps, TextureCache},
-    world_graphic::CacheableWorldGraphic,
 };
 use core::f32;
 use sdl3::{
@@ -179,41 +178,46 @@ enum PlayerControl {
     None,
 }
 
-struct PlayerProfile {
-    name: String,
-    control: PlayerControl,
-}
+impl PlayerControl {
+    fn update(&mut self, event_pump: &EventPump) {
+        match self {
+            PlayerControl::SideJoystick(joystick) => joystick.update(event_pump),
+            PlayerControl::CenteredJoystick(centered_joystick) => {
+                centered_joystick.update(event_pump)
+            }
+            _ => {}
+        }
+    }
 
-// impl Game {
-//     fn get_player_decision(player_control: &PlayerControl) -> PlayerDecision {
-//         match player_control {
-//             PlayerControl::Gamepad(joystick) => {
-//                 let axis_0: f32 = joystick.axis(0).unwrap_or(0) as f32 / 32768.0;
-//                 let axis_1: f32 = joystick.axis(1).unwrap_or(0) as f32 / 32768.0;
-//                 let joystick_direction = WorldVector::new(Meter::new(axis_0), -Meter::new(axis_1));
-//                 let acceleration_pressed = joystick.button(0).unwrap_or(false);
-//                 PlayerDecision {
-//                     direction: joystick_direction,
-//                     accelerate: acceleration_pressed,
-//                 }
-//             }
-//             PlayerControl::SideJoystick(joystick) => PlayerDecision {
-//                 direction: joystick.direction.normalized(),
-//                 accelerate: joystick.acceleration_pressed,
-//             },
-//             PlayerControl::CenteredJoystick(centered_joystick) => PlayerDecision {
-//                 direction: centered_joystick.direction.normalized(),
-//                 accelerate: centered_joystick.acceleration_pressed,
-//             },
-//             PlayerControl::RustFunction(_) => todo!(),
-//             PlayerControl::ExternalFunction => todo!(),
-//             PlayerControl::None => PlayerDecision {
-//                 direction: WorldVector::zero(),
-//                 accelerate: false,
-//             },
-//         }
-//     }
-// }
+    fn get_decision(&self) -> PlayerDecision {
+        match self {
+            PlayerControl::Gamepad(joystick) => {
+                let axis_0: f32 = joystick.axis(0).unwrap_or(0) as f32 / 32768.0;
+                let axis_1: f32 = joystick.axis(1).unwrap_or(0) as f32 / 32768.0;
+                let joystick_direction = WorldVector::new(Meter::new(axis_0), -Meter::new(axis_1));
+                let acceleration_pressed = joystick.button(0).unwrap_or(false);
+                PlayerDecision {
+                    direction: joystick_direction,
+                    accelerate: acceleration_pressed,
+                }
+            }
+            PlayerControl::SideJoystick(joystick) => PlayerDecision {
+                direction: joystick.direction.normalized(),
+                accelerate: joystick.acceleration_pressed,
+            },
+            PlayerControl::CenteredJoystick(centered_joystick) => PlayerDecision {
+                direction: centered_joystick.direction.normalized(),
+                accelerate: centered_joystick.acceleration_pressed,
+            },
+            PlayerControl::RustFunction => todo!(),
+            PlayerControl::ExternalFunction => todo!(),
+            PlayerControl::None => PlayerDecision {
+                direction: WorldVector::zero(),
+                accelerate: false,
+            },
+        }
+    }
+}
 
 const CAMERA_WIDTH: u32 = 1200;
 const CAMERA_HEIGHT: u32 = 900;
@@ -239,18 +243,13 @@ const LOG_PERF_ON_LAG: bool = true;
 
 const VSYNC: bool = true && !DEBUG_MAX_FPS;
 
-const DEBUG_PERFORMANCE_LABELS: [&str; 11] = [
-    "             Input Handeling",
-    "                   Car Logic",
-    "             Screen Clearing",
-    "     Enclosed Area Rendering",
-    "      Circuit Path Rendering",
-    "Circuit Generation Debugging",
-    "               Car Rendering",
-    "      Car Movement Debugging",
-    "              Text Rendering",
-    "        Side Panel Rendering",
-    "               Screen Update",
+const DEBUG_PERFORMANCE_LABELS: [&str; 6] = [
+    "     Input Handeling",
+    "          Game Logic",
+    "      Game Rendering",
+    "      Text Rendering",
+    "Side Panel Rendering",
+    "       Screen Update",
 ];
 
 const GAME_FPS: f32 = 60.0;
@@ -294,37 +293,42 @@ pub fn main() {
         }
     }
 
-    // Initialize the Game
-    let control = match joystick {
-        Some(js) => PlayerControl::Gamepad(js),
-        None => PlayerControl::CenteredJoystick(CenteredJoystick::new(
-            (CAMERA_WIDTH as f32 / 2., CAMERA_HEIGHT as f32 / 2.),
-            Scancode::Space,
-        )),
-        // None => PlayerControl::SideJoystick(SideJoystickGUI::new(
-        //     JOYSTICK_POSITION,
-        //     Scancode::Space,
-        //     JOYSTICK_INNER_RADIUS,
-        //     JOYSTICK_OUTER_RADIUS,
-        // )),
-    };
+    let mut player_controls = Vec::new();
 
-    let mut game: Game = Game::init_game(1, None, DT);
+    // Initialize the Game
+    match joystick {
+        Some(js) => player_controls.push(PlayerControl::Gamepad(js)),
+        None => player_controls.push(PlayerControl::SideJoystick(SideJoystickGUI::new(
+            JOYSTICK_POSITION,
+            Scancode::Space,
+            JOYSTICK_INNER_RADIUS,
+            JOYSTICK_OUTER_RADIUS,
+        ))),
+        // None => player_controls.push(PlayerControl::CenteredJoystick(CenteredJoystick::new(
+        //     (CAMERA_WIDTH as f32 / 2., CAMERA_HEIGHT as f32 / 2.),
+        //     Scancode::Space,
+        // ))),
+    }
+
+    let mut game: Game = Game::init_game(player_controls.len(), None, DT);
 
     // Initialize the cameras
-    let mut car_camera: Camera = Camera::new(
+    let mut cameras = Vec::new();
+
+    let followed_car_index: usize = 0;
+    let car_camera: Camera = Camera::new(
         CAMERA_WIDTH,
         CAMERA_HEIGHT,
-        game.players()[0].car().coords,
+        game.players()[followed_car_index].car().coords,
         (CAMERA_WIDTH as f32 / (game.players()[0].car().length.value() / 0.04)).round() as u32,
         // car length is 4% of the camera width
     );
-
-    let followed_car_index: usize = 0;
+    cameras.push(car_camera);
 
     let fix_camera: Camera = Camera::new(CAMERA_WIDTH, CAMERA_HEIGHT, WorldCoords::origin(), 2);
+    cameras.push(fix_camera);
 
-    let mut current_camera: usize = 0; // 0 for car_camera, 1 for fix_camera
+    let mut current_camera: usize = 0;
 
     // Initialize Font
     let ttf_context: ttf::Sdl3TtfContext = ttf::init().unwrap();
@@ -336,12 +340,8 @@ pub fn main() {
     );
 
     // Initialize the texture caching system
-    // TODO: Create a rendering context with texture_cache as a potential struct field
-    //       this could include the texture creator, can be passed as one object to rendering
-    //       functions rether than always including both the texture creator and the cache
-    //       separately. And it could also remove the need to alway have a visible variable of type
-    //       Option<TextureCache> circulating in the main function.
     let mut texture_cache: TextureCache<HashableGraphicProps> = TextureCache::new();
+    // TODO : Consider potentially merging texture_cache and texture_creator into a single struct
 
     // Render text textures
     let hold_space_text = TextGUI::new(
@@ -350,20 +350,17 @@ pub fn main() {
         Color::RGB(255, 255, 255),
     );
 
-    // TODO : Hande control differently
-    let js_name_str = if let PlayerControl::Gamepad(js) = todo!() {
-        format!("Controller: {}", js.name())
-    } else {
-        "No controller detected at startup".to_string()
-    };
-
-    let js_name_text = TextGUI::new(&js_name_str, &text_font, Color::RGB(255, 255, 255));
-
     let seed_text = TextGUI::new(
         &format!("SEED: {}", game.seed()),
         &text_font,
         Color::RGB(255, 255, 255),
     );
+
+    // Cache the text textures in advance
+    hold_space_text
+        .cache(&texture_creator, &mut texture_cache)
+        .ok();
+    seed_text.cache(&texture_creator, &mut texture_cache).ok();
 
     // Initialize an FPS sample queue to monitor average FPS across 3 seconds
     let mut fps_sample: VecDeque<f32> = VecDeque::with_capacity(3 * GAME_FPS as usize);
@@ -396,14 +393,15 @@ pub fn main() {
             }
         }
 
-        for player in game.mut_players() {
-            // TODO : Handle control differently
-            // let player_control = &mut player.profile.control;
-            // if let PlayerControl::SideJoystick(joystick) = player_control {
-            //     joystick.update(&event_pump);
-            // } else if let PlayerControl::CenteredJoystick(centered_joystick) = player_control {
-            //     centered_joystick.update(&event_pump);
-            // }
+        // Update player controls
+        for player_control in player_controls.iter_mut() {
+            player_control.update(&event_pump);
+        }
+
+        // Set Player decisions
+        for (player, player_control) in game.mut_players().iter_mut().zip(&player_controls) {
+            let decision = player_control.get_decision();
+            player.set_decision(decision);
         }
 
         if REGULAR_LOG_PERF {
@@ -417,114 +415,25 @@ pub fn main() {
         }
 
         // Update cameras
-        car_camera.set_coords(game.players()[followed_car_index].car().coords);
+        cameras[0].set_coords(game.players()[followed_car_index].car().coords);
 
         // Determine which camera to use for rendering
-        let current_camera: &Camera = if current_camera == 0 {
-            &car_camera
-        } else {
-            &fix_camera
-        };
-
-        // Start rendering
-        let mut failed_rendering: bool = false;
+        let current_camera = &cameras[current_camera];
 
         // Fill the entire screen with dark green
         canvas.set_draw_color(Color::RGB(25, 50, 25));
         canvas.clear();
 
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
-        }
+        // Render the game
+        let mut failed_rendering = false;
 
-        // Draw the circuit
-        failed_rendering |= game
-            .track()
-            .inner_border()
-            .as_graphic(true, Color::RGB(10, 70, 10))
-            .cached_render_onto(
-                current_camera,
-                &mut canvas,
-                &texture_creator,
-                &mut texture_cache,
-            )
-            .map_err(|e| eprintln!("Failed to render the enclosed area: {:?}", e))
-            .is_err();
-
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
-        }
-
-        failed_rendering |= game
-            .track()
-            .circuit_polygon()
-            .as_graphic(true, Color::RGB(80, 80, 80))
-            .cached_render_onto(
-                current_camera,
-                &mut canvas,
-                &texture_creator,
-                &mut texture_cache,
-            )
-            .map_err(|e| eprintln!("Failed to render the circuit polygon: {:?}", e))
-            .is_err();
-
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
-        }
-
-        if CIRCUIT_DEBUG {
-            // failed_rendering |= game
-            //     .track
-            //     .bezier_path
-            //     .render(
-            //         current_camera,
-            //         &mut canvas,
-            //         &texture_creator,
-            //         &mut texture_cache,
-            //     )
-            //     .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
-            //     .is_err();
-            // failed_rendering |= game
-            //     .track
-            //     .bezier_path
-            //     .render_debug_anchors(current_camera, &mut canvas)
-            //     .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
-            //     .is_err();
-        }
-
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
-        }
-
-        // Render the car
-        for player in game.players() {
-            failed_rendering |= &player
-                .car()
-                .pretty_render(current_camera, &mut canvas)
-                .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
-                .is_err();
-        }
-
-        if REGULAR_LOG_PERF {
-            timestamps.push(time.elapsed().as_micros());
-        }
-
-        // Debug car vectors
-        if MOUVEMENT_DEBUG {
-            // for player in &game.players {
-            //     failed_rendering |= &player
-            //         .car
-            //         .render_debug_vectors(
-            //             current_camera,
-            //             &mut canvas,
-            //             &text_font,
-            //             &texture_creator,
-            //             &mut texture_cache,
-            //         )
-            //         .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
-            //         .is_err();
-            // }
-        }
+        failed_rendering |= game.render_onto(
+            current_camera,
+            &mut canvas,
+            &texture_creator,
+            &mut texture_cache,
+            &text_font,
+        );
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -541,16 +450,6 @@ pub fn main() {
                 ),
             )
             .map_err(|e| eprintln!("Failed to render the hold space text: {:?}", e))
-            .is_err();
-
-        failed_rendering |= js_name_text
-            .cached_render_onto(
-                &mut canvas,
-                &texture_creator,
-                &mut texture_cache,
-                (SCREEN_WIDTH as i32 - js_name_text.width() as i32 - 10, 10),
-            )
-            .map_err(|e| eprintln!("Failed to render the joystick name text: {:?}", e))
             .is_err();
 
         failed_rendering |= seed_text
@@ -572,14 +471,13 @@ pub fn main() {
             .is_err();
 
         // Render the joystick
-        for player in game.players() {
-            // TODO : Handle control differently
-            // if let PlayerControl::SideJoystick(js) = &player.profile.control {
-            //     failed_rendering |= js
-            //         .render(&mut canvas, &texture_creator, &mut texture_cache)
-            //         .map_err(|e| eprintln!("Failed to render the joystick: {:?}", e))
-            //         .is_err();
-            // }
+        for player_control in &player_controls {
+            if let PlayerControl::SideJoystick(js) = player_control {
+                failed_rendering |= js
+                    .render(&mut canvas, &texture_creator, &mut texture_cache)
+                    .map_err(|e| eprintln!("Failed to render the joystick: {:?}", e))
+                    .is_err();
+            }
         }
 
         if REGULAR_LOG_PERF {

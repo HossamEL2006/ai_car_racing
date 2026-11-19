@@ -1,5 +1,6 @@
 use crate::{
-    game::{BezierPath, Car},
+    CIRCUIT_DEBUG, MOUVEMENT_DEBUG,
+    game::{BezierPath, Car, Game},
     screen_graphic::{CacheableScreenGraphic, TextFont, TextGUI},
     texture_cache::{HashableGraphicProps, TextureCache},
     world_graphic::{CacheableWorldGraphic, WorldGraphic},
@@ -147,5 +148,71 @@ impl Car {
             }
         }
         Ok(())
+    }
+}
+
+impl Game {
+    pub(crate) fn render_onto<'tc, U>(
+        &self,
+        camera: &Camera,
+        canvas: &mut Canvas<impl RenderTarget>,
+        texture_creator: &'tc render::TextureCreator<U>,
+        texture_cache: &mut TextureCache<'tc, HashableGraphicProps>,
+        text_font: &TextFont,
+    ) -> bool {
+        let mut failed_rendering = false;
+
+        // Render the track's inner border
+        failed_rendering |= self
+            .track()
+            .inner_border()
+            .as_graphic(true, Color::RGB(10, 70, 10))
+            .cached_render_onto(camera, canvas, texture_creator, texture_cache)
+            .map_err(|e| eprintln!("Failed to render the enclosed area: {:?}", e))
+            .is_err();
+
+        // Render the circuit polygon
+        failed_rendering |= self
+            .track()
+            .circuit_polygon()
+            .as_graphic(true, Color::RGB(80, 80, 80))
+            .cached_render_onto(camera, canvas, texture_creator, texture_cache)
+            .map_err(|e| eprintln!("Failed to render the circuit polygon: {:?}", e))
+            .is_err();
+
+        if CIRCUIT_DEBUG {
+            failed_rendering |= self
+                .track()
+                .bezier_path()
+                .render(camera, canvas, texture_creator, texture_cache)
+                .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
+                .is_err();
+            failed_rendering |= self
+                .track()
+                .bezier_path()
+                .render_debug_anchors(camera, canvas)
+                .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
+                .is_err();
+        }
+
+        for player in self.players() {
+            failed_rendering |= player
+                .car()
+                .pretty_render(camera, canvas)
+                .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
+                .is_err();
+        }
+
+        if MOUVEMENT_DEBUG {
+            for player in self.players() {
+                failed_rendering |= player
+                    .car()
+                    .render_debug_vectors(camera, canvas, text_font, texture_creator, texture_cache)
+                    .map_err(|e| eprintln!("Failed to render the car debug info: {:?}", e))
+                    .is_err();
+            }
+        }
+
+        failed_rendering
     }
 }

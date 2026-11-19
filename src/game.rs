@@ -338,6 +338,10 @@ impl Track {
     pub fn circuit_polygon(&self) -> &WorldPolygon {
         &self.circuit_polygon
     }
+
+    pub fn bezier_path(&self) -> &BezierPath {
+        &self.bezier_path
+    }
 }
 
 pub struct Car {
@@ -478,9 +482,9 @@ impl Car {
     }
 }
 
-struct PlayerDecision {
-    direction: WorldVector,
-    accelerate: bool,
+pub struct PlayerDecision {
+    pub direction: WorldVector,
+    pub accelerate: bool,
 }
 
 pub struct Player {

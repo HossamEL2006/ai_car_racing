@@ -2,8 +2,7 @@ use crate::world_graphic::{WorldPolygonGraphic, WorldVectorGraphic};
 use sdl3::{
     pixels::Color,
     rect,
-    render::{self, Canvas},
-    video::Window,
+    render::{self, Canvas, RenderTarget},
 };
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -137,7 +136,11 @@ impl WorldCoords {
         )
     }
 
-    pub fn render(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
+    pub fn render(
+        &self,
+        camera: &Camera,
+        canvas: &mut Canvas<impl RenderTarget>,
+    ) -> Result<(), sdl3::Error> {
         canvas.draw_rect(rect::Rect::from_center(self.as_point(camera), 5, 5))
     }
 }

@@ -1,18 +1,20 @@
+mod game;
+mod game_graphic;
 mod screen_graphic;
 mod texture_cache;
+mod utils;
 mod world_graphic;
 mod world_objects;
 
 use crate::{
+    game::Game,
     screen_graphic::{
         CacheableScreenGraphic, CircleGUI, DiscGUI, SizedScreenGraphic, TextFont, TextGUI,
     },
     texture_cache::{HashableGraphicProps, TextureCache},
-    world_graphic::{CacheableWorldGraphic, WorldGraphic},
+    world_graphic::CacheableWorldGraphic,
 };
 use core::f32;
-use rand::{SeedableRng, rngs::StdRng};
-use rand_distr::{Distribution, Normal};
 use sdl3::{
     EventPump,
     event::Event,
@@ -25,511 +27,9 @@ use sdl3::{
 };
 use std::{
     collections::VecDeque,
-    iter,
     time::{self, Duration},
 };
-use svg::{node::element::tag, parser};
 use world_objects::*;
-
-struct Car {
-    coords: WorldCoords,
-    direction_vec: WorldVector,
-    length: Meter,
-    width: Meter,
-    engine_acc: WorldVector,
-    velocity: WorldVector,
-    friction_factor: f32,
-    car_polys: Vec<(WorldPolygon, Color)>,
-}
-
-impl Car {
-    fn init(coords: WorldCoords, direction: WorldVector) -> Car {
-        let mut car: Car = Car {
-            coords,
-            direction_vec: direction.normalized(),
-            length: Meter::new(5.),
-            width: Meter::new(2.),
-            engine_acc: WorldVector::zero(),
-            velocity: WorldVector::zero(),
-            friction_factor: FRICTION_FACTOR,
-            car_polys: Vec::new(),
-        };
-        car.car_polys = car.load_svg();
-        car
-    }
-
-    fn corner_coords(&self) -> [WorldCoords; 4] {
-        [(1., 1.), (-1., 1.), (-1., -1.), (1., -1.)].map(|(d1, d2)| {
-            self.coords
-                + (d1 * (self.length.value() / 2.)) * self.direction_vec
-                + (d2 * (self.width.value() / 2.)) * self.direction_vec.orthogonal()
-        })
-    }
-
-    fn as_rect_polygon(&self) -> WorldPolygon {
-        WorldPolygon::new(self.corner_coords().as_slice())
-    }
-
-    fn load_svg(&self) -> Vec<(WorldPolygon, Color)> {
-        let svg_path: &str = "assets/f1_car.svg";
-        println!("Loading F1 car SVG from {}", svg_path);
-
-        let mut polygons: Vec<(WorldPolygon, Color)> = Vec::new();
-
-        let mut content = String::new();
-        let svg_iterator = svg::open(svg_path, &mut content).unwrap();
-        for event in svg_iterator {
-            if let parser::Event::Tag(tag::Polygon, _, attributes) = event {
-                let points = attributes.get("points").unwrap();
-                // parse into an sdl3 RGB
-                let color: Color = attributes
-                    .get("fill")
-                    .map(|s| parse_color(s).unwrap_or(Color::BLACK))
-                    .unwrap_or(Color::BLACK);
-                let polygon: WorldPolygon = WorldPolygon::new(
-                    &points
-                        .split_whitespace()
-                        .map(|pair| {
-                            let mut iter = pair.split(',');
-                            (iter.next().unwrap(), iter.next().unwrap())
-                        })
-                        .filter_map(|(s1, s2)| {
-                            let x = s1.parse::<f32>().ok()?;
-                            let y = s2.parse::<f32>().ok()?;
-                            Some(WorldCoords::new(
-                                Meter::new(self.width.value() * x / 200. - self.width.value() / 2.),
-                                Meter::new(
-                                    self.length.value() * y / 500. - self.length.value() / 2.,
-                                ),
-                            ))
-                        })
-                        .collect::<Vec<WorldCoords>>(),
-                );
-                polygons.push((polygon, color));
-            }
-        }
-
-        polygons
-    }
-
-    fn render_rect(&self, camera: &Camera, canvas: &mut Canvas<Window>) -> Result<(), sdl3::Error> {
-        let polygon = self.as_rect_polygon();
-        polygon
-            .as_graphic(false, Color::RGB(255, 0, 0))
-            .render_onto(camera, canvas)
-    }
-
-    fn pretty_render(
-        &self,
-        camera: &Camera,
-        canvas: &mut Canvas<Window>,
-    ) -> Result<(), sdl3::Error> {
-        // TODO: Implement CacheableGraphic for car with flexible hash values to allow fast
-        //       rendering without memory bloat.
-
-        for (mut polygon, color) in self.car_polys.clone() {
-            for vertex in polygon.vertices_mut() {
-                // rotate around origin to match car's direction vector
-                let angle_to_origin = self.direction_vec.angle();
-                let angle_to_vertical_pos = angle_to_origin - std::f32::consts::FRAC_PI_2;
-                let cos_angle = angle_to_vertical_pos.cos();
-                let sin_angle = angle_to_vertical_pos.sin();
-                let rotated_x = sin_angle * vertex.y().value() - cos_angle * vertex.x().value();
-                let rotated_y = sin_angle * vertex.x().value() + cos_angle * vertex.y().value();
-                *vertex = WorldCoords::new(Meter::new(rotated_x), Meter::new(-rotated_y));
-                *vertex = self.coords + (*vertex - WorldCoords::origin());
-            }
-            canvas.set_draw_color(color);
-            polygon
-                .as_graphic(true, color)
-                .render_onto(camera, canvas)?;
-        }
-        Ok(())
-    }
-
-    fn render_debug_vectors<'tc, U>(
-        &self,
-        camera: &Camera,
-        canvas: &mut Canvas<Window>,
-        font: &TextFont,
-        texture_creator: &'tc render::TextureCreator<U>,
-        texture_cache: &mut TextureCache<'tc, HashableGraphicProps>,
-    ) -> Result<(), ()> {
-        // fun fact :
-        // Implementing a text caching system made this function around 40 times faster
-        let debug_scalar: f32 = 0.3;
-        let base_point: WorldCoords = self.coords;
-        let friction_acc = -self.friction_factor * self.velocity;
-        let vectors = [
-            ((debug_scalar * self.velocity), Color::RGB(255, 0, 0), "v"),
-            (
-                (debug_scalar.powi(2) * self.engine_acc),
-                Color::RGB(0, 0, 255),
-                "p",
-            ),
-            (
-                (debug_scalar.powi(2) * friction_acc),
-                Color::RGB(0, 255, 0),
-                "f",
-            ),
-            (
-                (debug_scalar.powi(2) * (self.engine_acc + friction_acc)),
-                Color::RGB(255, 255, 0),
-                "a",
-            ),
-        ];
-
-        for (vector, color, label) in vectors {
-            let gvector = vector.as_graphic(base_point, color);
-            let tip_point = (base_point + vector).as_point(camera);
-            let tip_x = tip_point.x;
-            let tip_y = tip_point.y;
-            let vector_length_px = vector.norm().as_px_dist(camera);
-            if vector_length_px > 10. {
-                TextGUI::new(label, font, Color::RGB(255, 255, 255)).cached_render_onto(
-                    canvas,
-                    texture_creator,
-                    texture_cache,
-                    (tip_x, tip_y - 20),
-                )?;
-            }
-            if vector_length_px > 2. {
-                gvector.render_onto(camera, canvas).map_err(|_| ())?;
-            }
-        }
-        Ok(())
-    }
-
-    fn set_engine_acc(&mut self, acc: WorldVector) {
-        self.engine_acc = acc
-    }
-
-    fn set_friction_factor(&mut self, friction_factor: f32) {
-        self.friction_factor = friction_factor;
-    }
-
-    fn update_coords(&mut self, dt: f32) {
-        let friction_acc = -self.friction_factor * self.velocity;
-        self.velocity = self.velocity + dt * self.engine_acc + dt * friction_acc;
-        let velocity_norm: f32 = self.velocity.norm().value();
-        if velocity_norm > 1e-4 {
-            self.direction_vec = (1. / velocity_norm) * self.velocity;
-        }
-        self.coords = self.coords + dt * self.velocity;
-    }
-}
-
-#[derive(Clone)]
-struct BezierPathConfig {
-    center: WorldCoords,
-    n_anchors: usize,
-    mean_anchor_radius: f32,
-    stdev_anchor_radius: f32,
-    stdev_subanchor_angle_dev: f32,
-    points_per_bezier_curve: usize,
-}
-
-impl BezierPathConfig {
-    fn init_circular() -> Self {
-        BezierPathConfig {
-            center: WorldCoords::origin(),
-            n_anchors: N_ANCHORS,
-            mean_anchor_radius: MEAN_ANCHOR_RADIUS,
-            stdev_anchor_radius: 0.,
-            stdev_subanchor_angle_dev: 0.,
-            points_per_bezier_curve: POINTS_PER_BEZIER_CURVE,
-        }
-    }
-}
-
-impl Default for BezierPathConfig {
-    fn default() -> Self {
-        BezierPathConfig {
-            center: WorldCoords::origin(),
-            n_anchors: N_ANCHORS,
-            mean_anchor_radius: MEAN_ANCHOR_RADIUS,
-            stdev_anchor_radius: STDEV_ANCHOR_RADIUS,
-            stdev_subanchor_angle_dev: STDEV_SUBANCHOR_ANGLE_DEV,
-            points_per_bezier_curve: POINTS_PER_BEZIER_CURVE,
-        }
-    }
-}
-
-struct BezierPath {
-    coords: Vec<WorldCoords>,
-    starting_point: WorldCoords,
-    starting_direction: WorldVector,
-    config: BezierPathConfig,               // for debugging
-    anchor_triplets: Vec<[WorldCoords; 3]>, // for debugging
-}
-
-impl BezierPathConfig {
-    fn generate_path(&self, seed: Option<u64>) -> BezierPath {
-        fn sample_anchors(config: &BezierPathConfig, rng: &mut StdRng) -> Vec<WorldCoords> {
-            let radius_normal_dist: Normal<f32> =
-                Normal::new(config.mean_anchor_radius, config.stdev_anchor_radius).unwrap();
-            let angle_dev_dist: Normal<f32> =
-                Normal::new(0., (360. / config.n_anchors as f32) * 0.15).unwrap();
-
-            (0..config.n_anchors)
-                .map(|n: usize| {
-                    let angle_dev: f32 = angle_dev_dist.sample(rng);
-                    n as f32 * (360. / config.n_anchors as f32) + angle_dev - 90.
-                    // -90 to start the first anchor at the bottom of the screen
-                })
-                .collect::<Vec<f32>>()
-                // To avoid borrowing issues `&mut rng`, we collect into a Vec first
-                .into_iter()
-                .map(|angle: f32| {
-                    let radius: f32 = radius_normal_dist
-                        .sample(rng)
-                        .max(config.mean_anchor_radius / 4.);
-                    WorldCoords::new(
-                        Meter::new(config.center.x().value() + radius * angle.to_radians().cos()),
-                        Meter::new(config.center.y().value() + radius * angle.to_radians().sin()),
-                    )
-                })
-                .collect()
-        }
-
-        fn sample_anchor_triplets(
-            config: &BezierPathConfig,
-            mut anchors: Vec<WorldCoords>,
-            rng: &mut StdRng,
-        ) -> Vec<[WorldCoords; 3]> {
-            let mut anchor_triplets: Vec<[WorldCoords; 3]> = Vec::new();
-
-            let angle_dev_dist: Normal<f32> =
-                Normal::new(0., config.stdev_subanchor_angle_dev).unwrap();
-
-            let mut cyclic_anchors: Vec<WorldCoords> = vec![*anchors.last().unwrap()];
-            anchors.push(anchors[0]);
-            cyclic_anchors.extend(anchors);
-
-            for (prev_anchor, anchor, next_anchor) in cyclic_anchors
-                .windows(3)
-                .map(|window: &[WorldCoords]| (window[0], window[1], window[2]))
-            {
-                let angle: f32 = (anchor - config.center).angle() + f32::consts::FRAC_PI_2;
-                let angle_dev: f32 = angle_dev_dist.sample(rng);
-                let new_angle: f32 = angle + angle_dev.to_radians();
-
-                let track_dir_vector: WorldVector =
-                    WorldVector::new(Meter::new(new_angle.cos()), Meter::new(new_angle.sin()));
-
-                let subanchor_dist_coef: f32 = 0.4;
-
-                let right_subanchor_dist: f32 = (anchor - prev_anchor).norm().value();
-                let right_subanchor: WorldCoords =
-                    anchor + subanchor_dist_coef * (-right_subanchor_dist) * track_dir_vector;
-
-                let left_subanchor_dist: f32 = (next_anchor - anchor).norm().value();
-                let left_subanchor: WorldCoords =
-                    anchor + subanchor_dist_coef * left_subanchor_dist * track_dir_vector;
-
-                anchor_triplets.push([right_subanchor, anchor, left_subanchor]);
-            }
-
-            anchor_triplets
-        }
-
-        fn anchor_triplets_to_control_points(
-            anchor_triplets: &[[WorldCoords; 3]],
-        ) -> Vec<[WorldCoords; 4]> {
-            anchor_triplets
-                .windows(2)
-                .chain(iter::once(
-                    [
-                        *anchor_triplets.last().unwrap(),
-                        *anchor_triplets.first().unwrap(),
-                    ]
-                    .as_slice(),
-                ))
-                .map(|anch_pair: &[[WorldCoords; 3]]| {
-                    let [_, center1, left1] = anch_pair[0];
-                    let [right2, center2, _] = anch_pair[1];
-
-                    [center1, left1, right2, center2]
-                })
-                .collect()
-        }
-
-        fn generate_bezier_curve(control_points: [WorldCoords; 4], n: usize) -> Vec<WorldCoords> {
-            // the last point is not included to avoid duplication between consecutive curves
-            (0..n)
-                .map(|i: usize| {
-                    let t: f32 = i as f32 / n as f32;
-                    let one_minus_t: f32 = 1. - t;
-
-                    let p0: WorldCoords = control_points[0];
-                    let p1: WorldCoords = control_points[1];
-                    let p2: WorldCoords = control_points[2];
-                    let p3: WorldCoords = control_points[3];
-
-                    let x: f32 = one_minus_t.powi(3) * p0.x().value()
-                        + 3. * one_minus_t.powi(2) * t * p1.x().value()
-                        + 3. * one_minus_t * t.powi(2) * p2.x().value()
-                        + t.powi(3) * p3.x().value();
-
-                    let y: f32 = one_minus_t.powi(3) * p0.y().value()
-                        + 3. * one_minus_t.powi(2) * t * p1.y().value()
-                        + 3. * one_minus_t * t.powi(2) * p2.y().value()
-                        + t.powi(3) * p3.y().value();
-
-                    WorldCoords::new(Meter::new(x), Meter::new(y))
-                })
-                .collect()
-        }
-
-        let mut coords: Vec<WorldCoords> = Vec::new();
-
-        let mut rng: StdRng =
-            StdRng::seed_from_u64(seed.unwrap_or(rand::random_range(0..u64::MAX)));
-
-        let anchors: Vec<WorldCoords> = sample_anchors(self, &mut rng);
-
-        let starting_point: WorldCoords = anchors[0];
-
-        let anchor_triplets: Vec<[WorldCoords; 3]> =
-            sample_anchor_triplets(self, anchors, &mut rng);
-
-        let vec_control_points: Vec<[WorldCoords; 4]> =
-            anchor_triplets_to_control_points(&anchor_triplets);
-
-        vec_control_points
-            .iter()
-            .for_each(|control_points: &[WorldCoords; 4]| {
-                coords.extend(generate_bezier_curve(
-                    *control_points,
-                    self.points_per_bezier_curve,
-                ))
-            });
-
-        let starting_direction = anchor_triplets[0][2] - anchor_triplets[0][0];
-
-        BezierPath {
-            coords,
-            starting_point,
-            starting_direction,
-            config: self.clone(),
-            anchor_triplets,
-        }
-    }
-}
-
-impl BezierPath {
-    fn render<'tc, T: RenderTarget, U>(
-        &self,
-        camera: &Camera,
-        canvas: &mut Canvas<T>,
-        texture_creator: &'tc render::TextureCreator<U>,
-        texture_cache: &mut TextureCache<'tc, HashableGraphicProps>,
-    ) -> Result<(), ()> {
-        WorldPolygon::new(&self.coords)
-            .as_graphic(false, Color::RGB(255, 255, 255))
-            .cached_render_onto(camera, canvas, texture_creator, texture_cache)
-    }
-
-    fn render_debug_anchors(
-        &self,
-        camera: &Camera,
-        canvas: &mut Canvas<Window>,
-    ) -> Result<(), sdl3::Error> {
-        for [right, center, left] in self.anchor_triplets.iter() {
-            canvas.set_draw_color(Color::RGB(0, 255, 0));
-            canvas
-                .draw_line(center.as_point(camera), left.as_point(camera))
-                .unwrap();
-            left.render(camera, canvas).unwrap();
-
-            canvas.set_draw_color(Color::RGB(255, 255, 255));
-            center.render(camera, canvas).unwrap();
-
-            canvas.set_draw_color(Color::RGB(0, 0, 255));
-            canvas
-                .draw_line(center.as_point(camera), right.as_point(camera))
-                .unwrap();
-            right.render(camera, canvas).unwrap();
-        }
-
-        // draw lines from the center of the track to main anchor points
-        for [_, center, _] in self.anchor_triplets.iter() {
-            canvas.set_draw_color(Color::RGB(255, 255, 0));
-            canvas
-                .draw_line(center.as_point(camera), self.config.center.as_point(camera))
-                .unwrap();
-        }
-        Ok(())
-    }
-
-    fn generate_path_borders(&self, path_width: f32) -> (Vec<WorldCoords>, Vec<WorldCoords>) {
-        let half_width: f32 = path_width / 2.0;
-        let mut outer_border: Vec<WorldCoords> = Vec::new();
-        let mut inner_border: Vec<Option<WorldCoords>> = Vec::new();
-
-        let cyclic_path_points: Vec<&WorldCoords> = std::iter::once(self.coords.last().unwrap())
-            .chain(self.coords.iter())
-            .chain(std::iter::once(self.coords.first().unwrap()))
-            .collect();
-        for (i, (prev, curr, next)) in cyclic_path_points
-            .windows(3)
-            .map(|w| (w[0], w[1], w[2]))
-            .enumerate()
-        {
-            let direction: WorldVector = (*next - *prev).normalized();
-            let orthogonal: WorldVector = direction.orthogonal();
-            let outer_point: WorldCoords = *curr + (-half_width) * orthogonal;
-            let mut inner_point: Option<WorldCoords> = Some(*curr + half_width * orthogonal);
-
-            outer_border.push(outer_point);
-
-            // the inner point is only included if it is not too close to other path points
-            let points_per_curve: i32 = self.config.points_per_bezier_curve as i32;
-            for j in (i as i32 - points_per_curve)..=(i as i32 + points_per_curve) {
-                let idx: usize = j.rem_euclid(self.coords.len() as i32) as usize;
-                let point: &WorldCoords = &self.coords[idx];
-                if *point != *curr
-                    && (*point - inner_point.unwrap()).norm().value() < half_width * 1.001
-                {
-                    inner_point = None;
-                    break;
-                }
-            }
-            inner_border.push(inner_point);
-        }
-
-        // replace nones with closest next point
-        for i in 0..inner_border.len() {
-            if inner_border[i].is_none() {
-                let mut offset: usize = 1;
-                while offset < inner_border.len() {
-                    let next_idx: usize = (i + offset) % inner_border.len();
-                    if let Some(point) = inner_border[next_idx] {
-                        inner_border[i] = Some(point);
-                        break;
-                    }
-                    offset += 1;
-                }
-            }
-        }
-
-        (
-            outer_border,
-            inner_border.iter().map(|p| p.unwrap()).collect(),
-        )
-    }
-}
-
-fn parse_color(color_str: &str) -> Option<Color> {
-    if color_str.starts_with('#') && color_str.len() == 7 {
-        let r: u8 = u8::from_str_radix(&color_str[1..3], 16).ok()?;
-        let g: u8 = u8::from_str_radix(&color_str[3..5], 16).ok()?;
-        let b: u8 = u8::from_str_radix(&color_str[5..7], 16).ok()?;
-        Some(Color::RGB(r, g, b))
-    } else {
-        None
-    }
-}
 
 struct SideJoystickGUI {
     position: (i16, i16),
@@ -674,7 +174,7 @@ enum PlayerControl {
     Gamepad(Joystick),
     SideJoystick(SideJoystickGUI),
     CenteredJoystick(CenteredJoystick),
-    RustFunction(fn(&Car, &Track) -> WorldVector),
+    RustFunction,
     ExternalFunction,
     None,
 }
@@ -684,174 +184,36 @@ struct PlayerProfile {
     control: PlayerControl,
 }
 
-struct Player {
-    profile: PlayerProfile,
-    car: Car,
-}
-
-struct Track {
-    outer_border: WorldPolygon,
-    inner_border: WorldPolygon,
-    circuit_polygon: WorldPolygon,
-    bezier_path: BezierPath,
-    starting_point: WorldCoords,
-    starting_direction: WorldVector,
-}
-
-impl Track {
-    fn from_bezier(bezier_path: BezierPath, path_width: f32) -> Self {
-        let (outer_border, inner_border) = bezier_path.generate_path_borders(path_width);
-        let starting_point: WorldCoords = bezier_path.starting_point;
-        let starting_direction: WorldVector = bezier_path.starting_direction;
-        let inner_border = WorldPolygon::new(
-            inner_border
-                .iter()
-                .chain(iter::once(inner_border.first().unwrap()))
-                .copied()
-                .collect::<Vec<WorldCoords>>()
-                .as_slice(),
-        );
-        let outer_border = WorldPolygon::new(
-            outer_border
-                .iter()
-                .chain(iter::once(outer_border.first().unwrap()))
-                .copied()
-                .collect::<Vec<WorldCoords>>()
-                .as_slice(),
-        );
-        let circuit_polygon: WorldPolygon = WorldPolygon::new(
-            inner_border
-                .vertices()
-                .iter()
-                .chain(outer_border.vertices().iter().rev())
-                .copied()
-                .collect::<Vec<_>>()
-                .as_slice(),
-        );
-        Self {
-            outer_border,
-            inner_border,
-            circuit_polygon,
-            bezier_path,
-            starting_point,
-            starting_direction,
-        }
-    }
-}
-
-struct Game {
-    players: Vec<Player>,
-    track: Track,
-    seed: u64,
-    game_tick: u32,
-    dt: f32,
-}
-
-impl Game {
-    fn init_game(
-        profiles: Vec<PlayerProfile>,
-        seed: Option<u64>,
-        path_width: f32,
-        dt: f32,
-    ) -> Self {
-        let seed: u64 = seed.unwrap_or_else(|| rand::random_range(0..u64::MAX));
-        let path_config: BezierPathConfig = BezierPathConfig::default();
-        let path: BezierPath = path_config.generate_path(Some(seed));
-        let track: Track = Track::from_bezier(path, path_width);
-
-        let players = profiles
-            .into_iter()
-            .map(|profile| Player {
-                profile,
-                car: Car::init(track.starting_point, track.starting_direction),
-            })
-            .collect();
-
-        Self {
-            players,
-            track,
-            seed,
-            game_tick: 0,
-            dt,
-        }
-    }
-}
-
-impl Game {
-    fn get_player_decision(player_control: &PlayerControl) -> PlayerDecision {
-        match player_control {
-            PlayerControl::Gamepad(joystick) => {
-                let axis_0: f32 = joystick.axis(0).unwrap_or(0) as f32 / 32768.0;
-                let axis_1: f32 = joystick.axis(1).unwrap_or(0) as f32 / 32768.0;
-                let joystick_direction = WorldVector::new(Meter::new(axis_0), -Meter::new(axis_1));
-                let acceleration_pressed = joystick.button(0).unwrap_or(false);
-                PlayerDecision {
-                    direction: joystick_direction,
-                    accelerate: acceleration_pressed,
-                }
-            }
-            PlayerControl::SideJoystick(joystick) => PlayerDecision {
-                direction: joystick.direction.normalized(),
-                accelerate: joystick.acceleration_pressed,
-            },
-            PlayerControl::CenteredJoystick(centered_joystick) => PlayerDecision {
-                direction: centered_joystick.direction.normalized(),
-                accelerate: centered_joystick.acceleration_pressed,
-            },
-            PlayerControl::RustFunction(_) => todo!(),
-            PlayerControl::ExternalFunction => todo!(),
-            PlayerControl::None => PlayerDecision {
-                direction: WorldVector::zero(),
-                accelerate: false,
-            },
-        }
-    }
-
-    fn update(&mut self) {
-        // Apply player input to the car's acceleration
-        for player in &mut self.players {
-            let decision = Self::get_player_decision(&player.profile.control);
-            let joystick_direction = decision.direction;
-            let acceleration_pressed = decision.accelerate;
-            let car = &mut player.car;
-            if acceleration_pressed {
-                let engine_acc_vec = if joystick_direction.norm().value() < 0.2 {
-                    WorldVector::zero()
-                } else {
-                    joystick_direction.normalized()
-                };
-                car.set_engine_acc(ENGINE_ACCELERATION * engine_acc_vec);
-            } else {
-                car.set_engine_acc(WorldVector::zero());
-            }
-
-            // Check if any of the 4 corners of the car rect is outside the circuit polygon
-            let mut friction_multiplier: f32 = 2.0;
-            let car_corners: [WorldCoords; 4] = car.corner_coords();
-            let mut is_car_inside: bool = true;
-            for corner in &car_corners {
-                if !self.track.circuit_polygon.contains_point(*corner) {
-                    is_car_inside = false;
-                    friction_multiplier += 1.0;
-                }
-            }
-            if is_car_inside {
-                car.set_friction_factor(FRICTION_FACTOR);
-            } else {
-                car.set_friction_factor(friction_multiplier * FRICTION_FACTOR);
-            }
-
-            // Update the car's coordinates based on its current acceleration and velocity
-            car.update_coords(self.dt);
-        }
-        self.game_tick += 1;
-    }
-}
-
-struct PlayerDecision {
-    direction: WorldVector,
-    accelerate: bool,
-}
+// impl Game {
+//     fn get_player_decision(player_control: &PlayerControl) -> PlayerDecision {
+//         match player_control {
+//             PlayerControl::Gamepad(joystick) => {
+//                 let axis_0: f32 = joystick.axis(0).unwrap_or(0) as f32 / 32768.0;
+//                 let axis_1: f32 = joystick.axis(1).unwrap_or(0) as f32 / 32768.0;
+//                 let joystick_direction = WorldVector::new(Meter::new(axis_0), -Meter::new(axis_1));
+//                 let acceleration_pressed = joystick.button(0).unwrap_or(false);
+//                 PlayerDecision {
+//                     direction: joystick_direction,
+//                     accelerate: acceleration_pressed,
+//                 }
+//             }
+//             PlayerControl::SideJoystick(joystick) => PlayerDecision {
+//                 direction: joystick.direction.normalized(),
+//                 accelerate: joystick.acceleration_pressed,
+//             },
+//             PlayerControl::CenteredJoystick(centered_joystick) => PlayerDecision {
+//                 direction: centered_joystick.direction.normalized(),
+//                 accelerate: centered_joystick.acceleration_pressed,
+//             },
+//             PlayerControl::RustFunction(_) => todo!(),
+//             PlayerControl::ExternalFunction => todo!(),
+//             PlayerControl::None => PlayerDecision {
+//                 direction: WorldVector::zero(),
+//                 accelerate: false,
+//             },
+//         }
+//     }
+// }
 
 const CAMERA_WIDTH: u32 = 1200;
 const CAMERA_HEIGHT: u32 = 900;
@@ -866,19 +228,6 @@ const JOYSTICK_POSITION: (i16, i16) = (
 );
 const JOYSTICK_INNER_RADIUS: f32 = 50.;
 const JOYSTICK_OUTER_RADIUS: f32 = 100.;
-
-const LN_100: f32 = 4.60517;
-const TIME_TO_99_PERC_SPEED: f32 = 5.; // in s
-const THEORETICAL_MAX_SPEED: f32 = 100.; // in m/s
-const FRICTION_FACTOR: f32 = LN_100 / TIME_TO_99_PERC_SPEED;
-const ENGINE_ACCELERATION: f32 = THEORETICAL_MAX_SPEED * FRICTION_FACTOR;
-
-const N_ANCHORS: usize = 8;
-const MEAN_ANCHOR_RADIUS: f32 = 120.;
-const STDEV_ANCHOR_RADIUS: f32 = 50.;
-const STDEV_SUBANCHOR_ANGLE_DEV: f32 = (360. / N_ANCHORS as f32) / 3.0;
-const POINTS_PER_BEZIER_CURVE: usize = 15;
-const PATH_WIDTH: f32 = 15.0;
 
 const CIRCUIT_DEBUG: bool = false;
 const MOUVEMENT_DEBUG: bool = true;
@@ -960,22 +309,14 @@ pub fn main() {
         // )),
     };
 
-    let mut game: Game = Game::init_game(
-        vec![PlayerProfile {
-            name: "Human1".to_string(),
-            control,
-        }],
-        None,
-        PATH_WIDTH,
-        DT,
-    );
+    let mut game: Game = Game::init_game(1, None, DT);
 
     // Initialize the cameras
     let mut car_camera: Camera = Camera::new(
         CAMERA_WIDTH,
         CAMERA_HEIGHT,
-        game.players[0].car.coords,
-        (CAMERA_WIDTH as f32 / (game.players[0].car.length.value() / 0.04)).round() as u32,
+        game.players()[0].car().coords,
+        (CAMERA_WIDTH as f32 / (game.players()[0].car().length.value() / 0.04)).round() as u32,
         // car length is 4% of the camera width
     );
 
@@ -1009,7 +350,8 @@ pub fn main() {
         Color::RGB(255, 255, 255),
     );
 
-    let js_name_str = if let PlayerControl::Gamepad(js) = &game.players[0].profile.control {
+    // TODO : Hande control differently
+    let js_name_str = if let PlayerControl::Gamepad(js) = todo!() {
         format!("Controller: {}", js.name())
     } else {
         "No controller detected at startup".to_string()
@@ -1018,7 +360,7 @@ pub fn main() {
     let js_name_text = TextGUI::new(&js_name_str, &text_font, Color::RGB(255, 255, 255));
 
     let seed_text = TextGUI::new(
-        &format!("SEED: {}", game.seed),
+        &format!("SEED: {}", game.seed()),
         &text_font,
         Color::RGB(255, 255, 255),
     );
@@ -1054,13 +396,14 @@ pub fn main() {
             }
         }
 
-        for player in &mut game.players {
-            let player_control = &mut player.profile.control;
-            if let PlayerControl::SideJoystick(joystick) = player_control {
-                joystick.update(&event_pump);
-            } else if let PlayerControl::CenteredJoystick(centered_joystick) = player_control {
-                centered_joystick.update(&event_pump);
-            }
+        for player in game.mut_players() {
+            // TODO : Handle control differently
+            // let player_control = &mut player.profile.control;
+            // if let PlayerControl::SideJoystick(joystick) = player_control {
+            //     joystick.update(&event_pump);
+            // } else if let PlayerControl::CenteredJoystick(centered_joystick) = player_control {
+            //     centered_joystick.update(&event_pump);
+            // }
         }
 
         if REGULAR_LOG_PERF {
@@ -1074,7 +417,7 @@ pub fn main() {
         }
 
         // Update cameras
-        car_camera.set_coords(game.players[followed_car_index].car.coords);
+        car_camera.set_coords(game.players()[followed_car_index].car().coords);
 
         // Determine which camera to use for rendering
         let current_camera: &Camera = if current_camera == 0 {
@@ -1096,8 +439,8 @@ pub fn main() {
 
         // Draw the circuit
         failed_rendering |= game
-            .track
-            .inner_border
+            .track()
+            .inner_border()
             .as_graphic(true, Color::RGB(10, 70, 10))
             .cached_render_onto(
                 current_camera,
@@ -1113,8 +456,8 @@ pub fn main() {
         }
 
         failed_rendering |= game
-            .track
-            .circuit_polygon
+            .track()
+            .circuit_polygon()
             .as_graphic(true, Color::RGB(80, 80, 80))
             .cached_render_onto(
                 current_camera,
@@ -1130,23 +473,23 @@ pub fn main() {
         }
 
         if CIRCUIT_DEBUG {
-            failed_rendering |= game
-                .track
-                .bezier_path
-                .render(
-                    current_camera,
-                    &mut canvas,
-                    &texture_creator,
-                    &mut texture_cache,
-                )
-                .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
-                .is_err();
-            failed_rendering |= game
-                .track
-                .bezier_path
-                .render_debug_anchors(current_camera, &mut canvas)
-                .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
-                .is_err();
+            // failed_rendering |= game
+            //     .track
+            //     .bezier_path
+            //     .render(
+            //         current_camera,
+            //         &mut canvas,
+            //         &texture_creator,
+            //         &mut texture_cache,
+            //     )
+            //     .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
+            //     .is_err();
+            // failed_rendering |= game
+            //     .track
+            //     .bezier_path
+            //     .render_debug_anchors(current_camera, &mut canvas)
+            //     .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
+            //     .is_err();
         }
 
         if REGULAR_LOG_PERF {
@@ -1154,9 +497,9 @@ pub fn main() {
         }
 
         // Render the car
-        for player in &game.players {
+        for player in game.players() {
             failed_rendering |= &player
-                .car
+                .car()
                 .pretty_render(current_camera, &mut canvas)
                 .map_err(|e| eprintln!("Failed to render the car: {:?}", e))
                 .is_err();
@@ -1168,19 +511,19 @@ pub fn main() {
 
         // Debug car vectors
         if MOUVEMENT_DEBUG {
-            for player in &game.players {
-                failed_rendering |= &player
-                    .car
-                    .render_debug_vectors(
-                        current_camera,
-                        &mut canvas,
-                        &text_font,
-                        &texture_creator,
-                        &mut texture_cache,
-                    )
-                    .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
-                    .is_err();
-            }
+            // for player in &game.players {
+            //     failed_rendering |= &player
+            //         .car
+            //         .render_debug_vectors(
+            //             current_camera,
+            //             &mut canvas,
+            //             &text_font,
+            //             &texture_creator,
+            //             &mut texture_cache,
+            //         )
+            //         .map_err(|e| eprintln!("Failed to render the car debug vectors: {:?}", e))
+            //         .is_err();
+            // }
         }
 
         if REGULAR_LOG_PERF {
@@ -1229,13 +572,14 @@ pub fn main() {
             .is_err();
 
         // Render the joystick
-        for player in &game.players {
-            if let PlayerControl::SideJoystick(js) = &player.profile.control {
-                failed_rendering |= js
-                    .render(&mut canvas, &texture_creator, &mut texture_cache)
-                    .map_err(|e| eprintln!("Failed to render the joystick: {:?}", e))
-                    .is_err();
-            }
+        for player in game.players() {
+            // TODO : Handle control differently
+            // if let PlayerControl::SideJoystick(js) = &player.profile.control {
+            //     failed_rendering |= js
+            //         .render(&mut canvas, &texture_creator, &mut texture_cache)
+            //         .map_err(|e| eprintln!("Failed to render the joystick: {:?}", e))
+            //         .is_err();
+            // }
         }
 
         if REGULAR_LOG_PERF {
@@ -1253,7 +597,7 @@ pub fn main() {
         if failed_rendering {
             eprintln!(
                 "Warning: Failed rendering one or more elements on frame {}.",
-                game.game_tick
+                game.game_tick()
             );
         }
 
@@ -1273,22 +617,22 @@ pub fn main() {
         fps_sample.pop_front();
         let average_fps: f32 = fps_sample.iter().sum::<f32>() / fps_sample.len() as f32;
         let mut log_fps: bool =
-            REGULAR_LOG_FPS && game.game_tick.is_multiple_of(REGULARITY_INTERVAL);
+            REGULAR_LOG_FPS && game.game_tick().is_multiple_of(REGULARITY_INTERVAL);
         let mut log_perf: bool =
-            REGULAR_LOG_PERF && game.game_tick.is_multiple_of(REGULARITY_INTERVAL);
+            REGULAR_LOG_PERF && game.game_tick().is_multiple_of(REGULARITY_INTERVAL);
 
         // If average frame rate drops below 80% of the frame target, log a warning
         if average_fps < 0.8 * GAME_FPS {
             eprintln!(
                 "Warning: Average FPS dropped below 80% of the target on frame {}.",
-                game.game_tick
+                game.game_tick()
             );
             log_fps = true;
             LOG_PERF_ON_LAG.then(|| log_perf = true);
         }
 
         if log_fps || log_perf {
-            println!("Frame {}:", game.game_tick);
+            println!("Frame {}:", game.game_tick());
         }
 
         if log_fps {

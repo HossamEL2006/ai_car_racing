@@ -2,6 +2,7 @@ mod default_game_config;
 mod game;
 mod game_graphic;
 mod game_window_config;
+mod neuroevolution;
 mod screen_graphic;
 mod texture_cache;
 mod utils;
@@ -11,6 +12,7 @@ mod world_objects;
 use crate::{
     game::{Game, GameConfig, PlayerDecision},
     game_window_config::*,
+    neuroevolution::run_neuroevolution_training,
     screen_graphic::{
         CacheableScreenGraphic, CircleGUI, DiscGUI, SizedScreenGraphic, TextFont, TextGUI,
     },
@@ -238,7 +240,7 @@ const DEBUG_PERFORMANCE_LABELS: [&str; 6] = [
     "       Screen Update",
 ];
 
-pub fn main() {
+fn run_human_playable_game() {
     // Initialize SDL
     if VSYNC_ENABLED {
         sdl3::hint::set("SDL_RENDER_VSYNC", "1");
@@ -390,7 +392,7 @@ pub fn main() {
         // Set Player decisions
         for (player, player_control) in game.mut_players().iter_mut().zip(&player_controls) {
             let decision = player_control.get_decision();
-            player.set_decision(decision);
+            player.make_decision(decision);
         }
 
         if REGULAR_LOG_PERF {
@@ -408,10 +410,6 @@ pub fn main() {
 
         // Determine which camera to use for rendering
         let current_camera = &cameras[current_camera];
-
-        // Fill the entire screen with dark green
-        canvas.set_draw_color(Color::RGB(25, 50, 25));
-        canvas.clear();
 
         // Render the game
         let mut failed_rendering = false;
@@ -565,4 +563,9 @@ pub fn main() {
 
         // println!("{}", texture_cache.len());
     }
+}
+
+pub fn main() {
+    // run_human_playable_game();
+    run_neuroevolution_training();
 }

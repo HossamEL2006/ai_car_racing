@@ -497,7 +497,13 @@ impl Player {
         &mut self.car
     }
 
-    pub fn set_decision(&mut self, decision: PlayerDecision) {
+    pub fn make_decision(&mut self, mut decision: PlayerDecision) {
+        // normalize the direction vector
+        if decision.direction.norm().value() > 1e-4 {
+            decision.direction = decision.direction.normalized();
+        } else {
+            decision.direction = WorldVector::zero();
+        }
         self.decision = decision;
     }
 }

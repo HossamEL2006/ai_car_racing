@@ -169,6 +169,9 @@ impl Game {
     ) -> bool {
         let mut failed_rendering = false;
 
+        canvas.set_draw_color(Color::RGB(25, 50, 25));
+        canvas.clear();
+
         // Render the track's inner border
         failed_rendering |= self
             .track()

@@ -1,6 +1,6 @@
+use crate::game_window_config::MOUVEMENT_DEBUG;
 use crate::{
-    CIRCUIT_DEBUG, MOUVEMENT_DEBUG,
-    game::{BezierPath, Car, Game},
+    game::{Car, Game, Path},
     screen_graphic::{CacheableScreenGraphic, TextFont, TextGUI},
     texture_cache::{HashableGraphicProps, TextureCache},
     world_graphic::{CacheableWorldGraphic, WorldGraphic},
@@ -11,7 +11,9 @@ use sdl3::{
     render::{self, Canvas, RenderTarget},
 };
 
-impl BezierPath {
+// TODO: render a speedometer for the car
+
+impl Path {
     fn render<'tc, T: RenderTarget, U>(
         &self,
         camera: &Camera,
@@ -26,34 +28,35 @@ impl BezierPath {
 
     fn render_debug_anchors(
         &self,
-        camera: &Camera,
-        canvas: &mut Canvas<impl RenderTarget>,
+        _camera: &Camera,
+        _canvas: &mut Canvas<impl RenderTarget>,
     ) -> Result<(), sdl3::Error> {
-        for [right, center, left] in self.anchor_triplets.iter() {
-            canvas.set_draw_color(Color::RGB(0, 255, 0));
-            canvas
-                .draw_line(center.as_point(camera), left.as_point(camera))
-                .unwrap();
-            left.render(camera, canvas).unwrap();
+        todo!() // TODO: Reimplement circuit generation debugging
+        // for [right, center, left] in self.anchor_triplets.iter() {
+        //     canvas.set_draw_color(Color::RGB(0, 255, 0));
+        //     canvas
+        //         .draw_line(center.as_point(camera), left.as_point(camera))
+        //         .unwrap();
+        //     left.render(camera, canvas).unwrap();
 
-            canvas.set_draw_color(Color::RGB(255, 255, 255));
-            center.render(camera, canvas).unwrap();
+        //     canvas.set_draw_color(Color::RGB(255, 255, 255));
+        //     center.render(camera, canvas).unwrap();
 
-            canvas.set_draw_color(Color::RGB(0, 0, 255));
-            canvas
-                .draw_line(center.as_point(camera), right.as_point(camera))
-                .unwrap();
-            right.render(camera, canvas).unwrap();
-        }
+        //     canvas.set_draw_color(Color::RGB(0, 0, 255));
+        //     canvas
+        //         .draw_line(center.as_point(camera), right.as_point(camera))
+        //         .unwrap();
+        //     right.render(camera, canvas).unwrap();
+        // }
 
-        // draw lines from the center of the track to main anchor points
-        for [_, center, _] in self.anchor_triplets.iter() {
-            canvas.set_draw_color(Color::RGB(255, 255, 0));
-            canvas
-                .draw_line(center.as_point(camera), self.config.center.as_point(camera))
-                .unwrap();
-        }
-        Ok(())
+        // // draw lines from the center of the track to main anchor points
+        // for [_, center, _] in self.anchor_triplets.iter() {
+        //     canvas.set_draw_color(Color::RGB(255, 255, 0));
+        //     canvas
+        //         .draw_line(center.as_point(camera), self.config.center.as_point(camera))
+        //         .unwrap();
+        // }
+        // Ok(())
     }
 }
 
@@ -109,11 +112,15 @@ impl Car {
         // Implementing a text caching system made this function around 40 times faster
         let debug_scalar: f32 = 0.3;
         let base_point: WorldCoords = self.coords;
-        let friction_acc = -self.friction_factor * self.velocity;
+        let friction_acc = -self.curr_friction_factor * self.velocity_vector;
         let vectors = [
-            ((debug_scalar * self.velocity), Color::RGB(255, 0, 0), "v"),
             (
-                (debug_scalar.powi(2) * self.engine_acc),
+                (debug_scalar * self.velocity_vector),
+                Color::RGB(255, 0, 0),
+                "v",
+            ),
+            (
+                (debug_scalar.powi(2) * self.engine_acc_vector),
                 Color::RGB(0, 0, 255),
                 "p",
             ),
@@ -123,7 +130,7 @@ impl Car {
                 "f",
             ),
             (
-                (debug_scalar.powi(2) * (self.engine_acc + friction_acc)),
+                (debug_scalar.powi(2) * (self.engine_acc_vector + friction_acc)),
                 Color::RGB(255, 255, 0),
                 "a",
             ),
@@ -180,20 +187,20 @@ impl Game {
             .map_err(|e| eprintln!("Failed to render the circuit polygon: {:?}", e))
             .is_err();
 
-        if CIRCUIT_DEBUG {
-            failed_rendering |= self
-                .track()
-                .bezier_path()
-                .render(camera, canvas, texture_creator, texture_cache)
-                .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
-                .is_err();
-            failed_rendering |= self
-                .track()
-                .bezier_path()
-                .render_debug_anchors(camera, canvas)
-                .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
-                .is_err();
-        }
+        // if CIRCUIT_DEBUG {
+        //     failed_rendering |= self
+        //         .track()
+        //         .bezier_path()
+        //         .render(camera, canvas, texture_creator, texture_cache)
+        //         .map_err(|e| eprintln!("Failed to render the path: {:?}", e))
+        //         .is_err();
+        //     failed_rendering |= self
+        //         .track()
+        //         .bezier_path()
+        //         .render_debug_anchors(camera, canvas)
+        //         .map_err(|e| eprintln!("Failed to render the path debug anchors: {:?}", e))
+        //         .is_err();
+        // }
 
         for player in self.players() {
             failed_rendering |= player

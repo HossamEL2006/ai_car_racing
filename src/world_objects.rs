@@ -221,6 +221,12 @@ impl WorldVector {
     }
 }
 
+impl Debug for WorldVector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WorldVec({:?}, {:?})", self.x, self.y)
+    }
+}
+
 impl ops::Sub for WorldCoords {
     type Output = WorldVector;
 

@@ -1,3 +1,4 @@
+use crate::default_game_config::*;
 use crate::{
     utils::parse_color,
     world_objects::{Meter, WorldCoords, WorldPolygon, WorldVector},
@@ -8,40 +9,146 @@ use sdl3::pixels::Color;
 use std::{f32, iter};
 use svg::{node::element::tag, parser};
 
-const N_ANCHORS: usize = 8;
-const MEAN_ANCHOR_RADIUS: f32 = 120.;
-const STDEV_ANCHOR_RADIUS: f32 = 50.;
-const STDEV_SUBANCHOR_ANGLE_DEV: f32 = (360. / N_ANCHORS as f32) / 3.0;
-const POINTS_PER_BEZIER_CURVE: usize = 15;
-const PATH_WIDTH: f32 = 15.0;
-
-const LN_100: f32 = 4.60517;
-const TIME_TO_99_PERC_SPEED: f32 = 5.; // in s
-const THEORETICAL_MAX_SPEED: f32 = 100.; // in m/s
-const FRICTION_FACTOR: f32 = LN_100 / TIME_TO_99_PERC_SPEED;
-const ENGINE_ACCELERATION: f32 = THEORETICAL_MAX_SPEED * FRICTION_FACTOR;
-
-#[derive(Clone)]
-pub(crate) struct BezierPathConfig {
-    pub(crate) center: WorldCoords,
-    n_anchors: usize,
-    mean_anchor_radius: f32,
-    stdev_anchor_radius: f32,
-    stdev_subanchor_angle_dev: f32,
-    points_per_bezier_curve: usize,
+pub(crate) struct Path {
+    pub coords: Vec<WorldCoords>,
+    pub starting_point: WorldCoords,
+    pub starting_direction: WorldVector,
+    // pub(crate) config: BezierPathConfig, // for debugging
+    // pub(crate) anchor_triplets: Vec<[WorldCoords; 3]>, // for debugging
 }
 
-impl BezierPathConfig {
-    fn init_circular() -> Self {
-        BezierPathConfig {
-            center: WorldCoords::origin(),
-            n_anchors: N_ANCHORS,
-            mean_anchor_radius: MEAN_ANCHOR_RADIUS,
-            stdev_anchor_radius: 0.,
-            stdev_subanchor_angle_dev: 0.,
-            points_per_bezier_curve: POINTS_PER_BEZIER_CURVE,
+impl Path {
+    fn generate_path_borders(&self, path_width: f32) -> (Vec<WorldCoords>, Vec<WorldCoords>) {
+        let half_width: f32 = path_width / 2.0;
+        let mut outer_border: Vec<WorldCoords> = Vec::new();
+        let mut inner_border: Vec<Option<WorldCoords>> = Vec::new();
+
+        let cyclic_path_points: Vec<&WorldCoords> = std::iter::once(self.coords.last().unwrap())
+            .chain(self.coords.iter())
+            .chain(std::iter::once(self.coords.first().unwrap()))
+            .collect();
+        for (i, (prev, curr, next)) in cyclic_path_points
+            .windows(3)
+            .map(|w| (w[0], w[1], w[2]))
+            .enumerate()
+        {
+            let direction: WorldVector = (*next - *prev).normalized();
+            let orthogonal: WorldVector = direction.orthogonal();
+            let outer_point: WorldCoords = *curr + (-half_width) * orthogonal;
+            let mut inner_point: Option<WorldCoords> = Some(*curr + half_width * orthogonal);
+
+            outer_border.push(outer_point);
+
+            // the inner point is only included if it is not too close to other path points
+            let points_per_curve: i32 = self.coords.len() as i32 / 10; // 10 is arbitrary
+            for j in (i as i32 - points_per_curve)..=(i as i32 + points_per_curve) {
+                let idx: usize = j.rem_euclid(self.coords.len() as i32) as usize;
+                let point: &WorldCoords = &self.coords[idx];
+                if *point != *curr
+                    && (*point - inner_point.unwrap()).norm().value() < half_width * 1.001
+                {
+                    inner_point = None;
+                    break;
+                }
+            }
+            inner_border.push(inner_point);
+        }
+
+        // replace nones with closest next point
+        for i in 0..inner_border.len() {
+            if inner_border[i].is_none() {
+                let mut offset: usize = 1;
+                while offset < inner_border.len() {
+                    let next_idx: usize = (i + offset) % inner_border.len();
+                    if let Some(point) = inner_border[next_idx] {
+                        inner_border[i] = Some(point);
+                        break;
+                    }
+                    offset += 1;
+                }
+            }
+        }
+
+        (
+            outer_border,
+            inner_border.iter().map(|p| p.unwrap()).collect(),
+        )
+    }
+}
+
+pub struct Track {
+    outer_border: WorldPolygon,
+    inner_border: WorldPolygon,
+    circuit_polygon: WorldPolygon,
+    path: Path,
+    starting_point: WorldCoords,
+    starting_direction: WorldVector,
+}
+
+impl Track {
+    fn from_path(path: Path, path_width: f32) -> Self {
+        let (outer_border, inner_border) = path.generate_path_borders(path_width);
+        let starting_point: WorldCoords = path.starting_point;
+        let starting_direction: WorldVector = path.starting_direction;
+        let inner_border = WorldPolygon::new(
+            inner_border
+                .iter()
+                .chain(iter::once(inner_border.first().unwrap()))
+                .copied()
+                .collect::<Vec<WorldCoords>>()
+                .as_slice(),
+        );
+        let outer_border = WorldPolygon::new(
+            outer_border
+                .iter()
+                .chain(iter::once(outer_border.first().unwrap()))
+                .copied()
+                .collect::<Vec<WorldCoords>>()
+                .as_slice(),
+        );
+        let circuit_polygon: WorldPolygon = WorldPolygon::new(
+            inner_border
+                .vertices()
+                .iter()
+                .chain(outer_border.vertices().iter().rev())
+                .copied()
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
+        Self {
+            outer_border,
+            inner_border,
+            circuit_polygon,
+            path,
+            starting_point,
+            starting_direction,
         }
     }
+
+    pub fn inner_border(&self) -> &WorldPolygon {
+        &self.inner_border
+    }
+
+    pub fn outer_border(&self) -> &WorldPolygon {
+        &self.outer_border
+    }
+
+    pub fn circuit_polygon(&self) -> &WorldPolygon {
+        &self.circuit_polygon
+    }
+
+    pub fn bezier_path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) struct BezierPathConfig {
+    pub center: WorldCoords,
+    pub n_anchors: usize,
+    pub mean_anchor_radius: f32,
+    pub stdev_anchor_radius: f32,
+    pub stdev_subanchor_angle_dev: f32,
+    pub points_per_bezier_curve: usize,
 }
 
 impl Default for BezierPathConfig {
@@ -57,16 +164,8 @@ impl Default for BezierPathConfig {
     }
 }
 
-pub(crate) struct BezierPath {
-    pub(crate) coords: Vec<WorldCoords>,
-    starting_point: WorldCoords,
-    starting_direction: WorldVector,
-    pub(crate) config: BezierPathConfig, // for debugging
-    pub(crate) anchor_triplets: Vec<[WorldCoords; 3]>, // for debugging
-}
-
 impl BezierPathConfig {
-    fn generate_path(&self, seed: Option<u64>) -> BezierPath {
+    fn into_path(self, seed: u64) -> Path {
         fn sample_anchors(config: &BezierPathConfig, rng: &mut StdRng) -> Vec<WorldCoords> {
             let radius_normal_dist: Normal<f32> =
                 Normal::new(config.mean_anchor_radius, config.stdev_anchor_radius).unwrap();
@@ -185,15 +284,14 @@ impl BezierPathConfig {
 
         let mut coords: Vec<WorldCoords> = Vec::new();
 
-        let mut rng: StdRng =
-            StdRng::seed_from_u64(seed.unwrap_or(rand::random_range(0..u64::MAX)));
+        let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
-        let anchors: Vec<WorldCoords> = sample_anchors(self, &mut rng);
+        let anchors: Vec<WorldCoords> = sample_anchors(&self, &mut rng);
 
         let starting_point: WorldCoords = anchors[0];
 
         let anchor_triplets: Vec<[WorldCoords; 3]> =
-            sample_anchor_triplets(self, anchors, &mut rng);
+            sample_anchor_triplets(&self, anchors, &mut rng);
 
         let vec_control_points: Vec<[WorldCoords; 4]> =
             anchor_triplets_to_control_points(&anchor_triplets);
@@ -209,138 +307,31 @@ impl BezierPathConfig {
 
         let starting_direction = anchor_triplets[0][2] - anchor_triplets[0][0];
 
-        BezierPath {
+        Path {
             coords,
             starting_point,
             starting_direction,
-            config: self.clone(),
-            anchor_triplets,
+            // config: self.clone(),
+            // anchor_triplets,
         }
     }
 }
 
-impl BezierPath {
-    fn generate_path_borders(&self, path_width: f32) -> (Vec<WorldCoords>, Vec<WorldCoords>) {
-        let half_width: f32 = path_width / 2.0;
-        let mut outer_border: Vec<WorldCoords> = Vec::new();
-        let mut inner_border: Vec<Option<WorldCoords>> = Vec::new();
-
-        let cyclic_path_points: Vec<&WorldCoords> = std::iter::once(self.coords.last().unwrap())
-            .chain(self.coords.iter())
-            .chain(std::iter::once(self.coords.first().unwrap()))
-            .collect();
-        for (i, (prev, curr, next)) in cyclic_path_points
-            .windows(3)
-            .map(|w| (w[0], w[1], w[2]))
-            .enumerate()
-        {
-            let direction: WorldVector = (*next - *prev).normalized();
-            let orthogonal: WorldVector = direction.orthogonal();
-            let outer_point: WorldCoords = *curr + (-half_width) * orthogonal;
-            let mut inner_point: Option<WorldCoords> = Some(*curr + half_width * orthogonal);
-
-            outer_border.push(outer_point);
-
-            // the inner point is only included if it is not too close to other path points
-            let points_per_curve: i32 = self.config.points_per_bezier_curve as i32;
-            for j in (i as i32 - points_per_curve)..=(i as i32 + points_per_curve) {
-                let idx: usize = j.rem_euclid(self.coords.len() as i32) as usize;
-                let point: &WorldCoords = &self.coords[idx];
-                if *point != *curr
-                    && (*point - inner_point.unwrap()).norm().value() < half_width * 1.001
-                {
-                    inner_point = None;
-                    break;
-                }
-            }
-            inner_border.push(inner_point);
-        }
-
-        // replace nones with closest next point
-        for i in 0..inner_border.len() {
-            if inner_border[i].is_none() {
-                let mut offset: usize = 1;
-                while offset < inner_border.len() {
-                    let next_idx: usize = (i + offset) % inner_border.len();
-                    if let Some(point) = inner_border[next_idx] {
-                        inner_border[i] = Some(point);
-                        break;
-                    }
-                    offset += 1;
-                }
-            }
-        }
-
-        (
-            outer_border,
-            inner_border.iter().map(|p| p.unwrap()).collect(),
-        )
-    }
+pub struct CarConfig {
+    pub length: Meter,
+    pub width: Meter,
+    pub friction_factor: f32,
+    pub engine_acc_magnitude: f32,
 }
 
-pub struct Track {
-    outer_border: WorldPolygon,
-    inner_border: WorldPolygon,
-    circuit_polygon: WorldPolygon,
-    bezier_path: BezierPath,
-    starting_point: WorldCoords,
-    starting_direction: WorldVector,
-}
-
-impl Track {
-    fn from_bezier(bezier_path: BezierPath, path_width: f32) -> Self {
-        let (outer_border, inner_border) = bezier_path.generate_path_borders(path_width);
-        let starting_point: WorldCoords = bezier_path.starting_point;
-        let starting_direction: WorldVector = bezier_path.starting_direction;
-        let inner_border = WorldPolygon::new(
-            inner_border
-                .iter()
-                .chain(iter::once(inner_border.first().unwrap()))
-                .copied()
-                .collect::<Vec<WorldCoords>>()
-                .as_slice(),
-        );
-        let outer_border = WorldPolygon::new(
-            outer_border
-                .iter()
-                .chain(iter::once(outer_border.first().unwrap()))
-                .copied()
-                .collect::<Vec<WorldCoords>>()
-                .as_slice(),
-        );
-        let circuit_polygon: WorldPolygon = WorldPolygon::new(
-            inner_border
-                .vertices()
-                .iter()
-                .chain(outer_border.vertices().iter().rev())
-                .copied()
-                .collect::<Vec<_>>()
-                .as_slice(),
-        );
-        Self {
-            outer_border,
-            inner_border,
-            circuit_polygon,
-            bezier_path,
-            starting_point,
-            starting_direction,
+impl Default for CarConfig {
+    fn default() -> Self {
+        CarConfig {
+            length: Meter::new(CAR_LENGTH),
+            width: Meter::new(CAR_WIDTH),
+            engine_acc_magnitude: ENGINE_ACCELERATION,
+            friction_factor: FRICTION_FACTOR,
         }
-    }
-
-    pub fn inner_border(&self) -> &WorldPolygon {
-        &self.inner_border
-    }
-
-    pub fn outer_border(&self) -> &WorldPolygon {
-        &self.outer_border
-    }
-
-    pub fn circuit_polygon(&self) -> &WorldPolygon {
-        &self.circuit_polygon
-    }
-
-    pub fn bezier_path(&self) -> &BezierPath {
-        &self.bezier_path
     }
 }
 
@@ -349,22 +340,26 @@ pub struct Car {
     pub(crate) direction_vec: WorldVector,
     pub(crate) length: Meter,
     pub(crate) width: Meter,
-    pub(crate) engine_acc: WorldVector,
-    pub(crate) velocity: WorldVector,
-    pub(crate) friction_factor: f32,
+    pub(crate) engine_acc_vector: WorldVector,
+    pub(crate) velocity_vector: WorldVector,
+    pub(crate) engine_acc_magnitude: f32,
+    pub(crate) base_friction_factor: f32,
+    pub(crate) curr_friction_factor: f32,
     pub(crate) car_polys: Vec<(WorldPolygon, Color)>,
 }
 
 impl Car {
-    pub fn init(coords: WorldCoords, direction: WorldVector) -> Car {
+    pub fn init(car_config: &CarConfig, coords: WorldCoords, direction: WorldVector) -> Car {
         let mut car: Car = Car {
             coords,
             direction_vec: direction.normalized(),
-            length: Meter::new(5.),
-            width: Meter::new(2.),
-            engine_acc: WorldVector::zero(),
-            velocity: WorldVector::zero(),
-            friction_factor: FRICTION_FACTOR,
+            length: car_config.length, // 5
+            width: car_config.width,   // 2
+            engine_acc_vector: WorldVector::zero(),
+            velocity_vector: WorldVector::zero(),
+            engine_acc_magnitude: car_config.engine_acc_magnitude,
+            base_friction_factor: car_config.friction_factor,
+            curr_friction_factor: car_config.friction_factor,
             car_polys: Vec::new(),
         };
         car.car_polys = car.load_svg();
@@ -426,21 +421,22 @@ impl Car {
     }
 
     fn set_engine_acc(&mut self, acc: WorldVector) {
-        self.engine_acc = acc
+        self.engine_acc_vector = acc
     }
 
     fn set_friction_factor(&mut self, friction_factor: f32) {
-        self.friction_factor = friction_factor;
+        self.curr_friction_factor = friction_factor;
     }
 
     fn update_coords(&mut self, dt: f32) {
-        let friction_acc = -self.friction_factor * self.velocity;
-        self.velocity = self.velocity + dt * self.engine_acc + dt * friction_acc;
-        let velocity_norm: f32 = self.velocity.norm().value();
+        let friction_acc = -self.curr_friction_factor * self.velocity_vector;
+        self.velocity_vector =
+            self.velocity_vector + dt * self.engine_acc_vector + dt * friction_acc;
+        let velocity_norm: f32 = self.velocity_vector.norm().value();
         if velocity_norm > 1e-4 {
-            self.direction_vec = (1. / velocity_norm) * self.velocity;
+            self.direction_vec = (1. / velocity_norm) * self.velocity_vector;
         }
-        self.coords = self.coords + dt * self.velocity;
+        self.coords = self.coords + dt * self.velocity_vector;
     }
 
     fn update(
@@ -456,7 +452,7 @@ impl Car {
             } else {
                 joystick_direction.normalized()
             };
-            self.set_engine_acc(ENGINE_ACCELERATION * engine_acc_vec);
+            self.set_engine_acc(self.engine_acc_magnitude * engine_acc_vec);
         } else {
             self.set_engine_acc(WorldVector::zero());
         }
@@ -472,9 +468,9 @@ impl Car {
             }
         }
         if is_car_inside {
-            self.set_friction_factor(FRICTION_FACTOR);
+            self.set_friction_factor(self.base_friction_factor);
         } else {
-            self.set_friction_factor(friction_multiplier * FRICTION_FACTOR);
+            self.set_friction_factor(friction_multiplier * self.base_friction_factor);
         }
 
         // Update the car's coordinates based on its current acceleration and velocity
@@ -506,24 +502,73 @@ impl Player {
     }
 }
 
+pub enum PathConfig {
+    Random {
+        path_config: BezierPathConfig,
+        seed: Option<u64>,
+    },
+    Custom {
+        path: Path,
+    },
+}
+
+impl Default for PathConfig {
+    fn default() -> Self {
+        PathConfig::Random {
+            path_config: BezierPathConfig::default(),
+            seed: None,
+        }
+    }
+}
+
+pub struct GameConfig {
+    pub path_config: PathConfig,
+    pub car_config: CarConfig,
+    pub track_width: f32,
+    pub dt: f32,
+}
+
+impl Default for GameConfig {
+    fn default() -> Self {
+        Self {
+            path_config: PathConfig::default(),
+            car_config: CarConfig::default(),
+            track_width: PATH_WIDTH,
+            dt: DT,
+        }
+    }
+}
+
 pub struct Game {
     players: Vec<Player>,
     track: Track,
-    seed: u64,
+    seed: Option<u64>,
     game_tick: u32,
     dt: f32,
 }
 
 impl Game {
-    pub fn init_game(n_players: usize, seed: Option<u64>, dt: f32) -> Self {
-        let seed: u64 = seed.unwrap_or_else(|| rand::random_range(0..u64::MAX));
-        let path_config: BezierPathConfig = BezierPathConfig::default();
-        let path: BezierPath = path_config.generate_path(Some(seed));
-        let track: Track = Track::from_bezier(path, PATH_WIDTH);
+    pub fn init_game(n_players: usize, game_config: GameConfig) -> Self {
+        let mut game_seed = None;
+
+        let path = match game_config.path_config {
+            PathConfig::Random { path_config, seed } => {
+                let x = seed.unwrap_or_else(|| rand::random_range(0..u64::MAX));
+                game_seed = Some(x);
+                path_config.into_path(x)
+            }
+            PathConfig::Custom { path } => path,
+        };
+
+        let track: Track = Track::from_path(path, game_config.track_width);
 
         let players = (0..n_players)
             .map(|_| Player {
-                car: Car::init(track.starting_point, track.starting_direction),
+                car: Car::init(
+                    &game_config.car_config,
+                    track.starting_point,
+                    track.starting_direction,
+                ),
                 decision: PlayerDecision {
                     direction: WorldVector::zero(),
                     accelerate: false,
@@ -534,9 +579,9 @@ impl Game {
         Self {
             players,
             track,
-            seed,
+            seed: game_seed,
             game_tick: 0,
-            dt,
+            dt: game_config.dt,
         }
     }
 
@@ -558,7 +603,7 @@ impl Game {
         self.game_tick += 1;
     }
 
-    pub fn seed(&self) -> u64 {
+    pub fn seed(&self) -> Option<u64> {
         self.seed
     }
 

@@ -1,5 +1,7 @@
+mod default_game_config;
 mod game;
 mod game_graphic;
+mod game_window_config;
 mod screen_graphic;
 mod texture_cache;
 mod utils;
@@ -7,7 +9,8 @@ mod world_graphic;
 mod world_objects;
 
 use crate::{
-    game::{Game, PlayerDecision},
+    game::{Game, GameConfig, PlayerDecision},
+    game_window_config::*,
     screen_graphic::{
         CacheableScreenGraphic, CircleGUI, DiscGUI, SizedScreenGraphic, TextFont, TextGUI,
     },
@@ -219,30 +222,13 @@ impl PlayerControl {
     }
 }
 
-const CAMERA_WIDTH: u32 = 1200;
-const CAMERA_HEIGHT: u32 = 900;
-const SIDE_PANEL_WIDTH: u32 = 400;
-
-const SCREEN_WIDTH: u32 = CAMERA_WIDTH + SIDE_PANEL_WIDTH;
-const SCREEN_HEIGHT: u32 = CAMERA_HEIGHT;
-
-const JOYSTICK_POSITION: (i16, i16) = (
-    CAMERA_WIDTH as i16 + SIDE_PANEL_WIDTH as i16 / 2,
-    CAMERA_HEIGHT as i16 / 3,
-);
-const JOYSTICK_INNER_RADIUS: f32 = 50.;
-const JOYSTICK_OUTER_RADIUS: f32 = 100.;
-
-const CIRCUIT_DEBUG: bool = false;
-const MOUVEMENT_DEBUG: bool = true;
+// Logging and debug configuration
 const DEBUG_MAX_FPS: bool = false;
 const REGULAR_LOG_FPS: bool = true;
 const REGULAR_LOG_PERF: bool = true;
 const REGULARITY_INTERVAL: u32 = 60 * 3;
 const LOG_PERF_ON_LAG: bool = true;
-
-const VSYNC: bool = true && !DEBUG_MAX_FPS;
-
+const VSYNC_ENABLED: bool = VSYNC && !DEBUG_MAX_FPS;
 const DEBUG_PERFORMANCE_LABELS: [&str; 6] = [
     "     Input Handeling",
     "          Game Logic",
@@ -252,12 +238,9 @@ const DEBUG_PERFORMANCE_LABELS: [&str; 6] = [
     "       Screen Update",
 ];
 
-const GAME_FPS: f32 = 60.0;
-const DT: f32 = GAME_FPS.recip();
-
 pub fn main() {
     // Initialize SDL
-    if VSYNC {
+    if VSYNC_ENABLED {
         sdl3::hint::set("SDL_RENDER_VSYNC", "1");
     }
     let sdl_context: sdl3::Sdl = sdl3::init().unwrap();
@@ -310,7 +293,9 @@ pub fn main() {
         // ))),
     }
 
-    let mut game: Game = Game::init_game(player_controls.len(), None, DT);
+    let game_config = GameConfig::default();
+    let game_fps = game_config.dt.recip();
+    let mut game: Game = Game::init_game(player_controls.len(), game_config);
 
     // Initialize the cameras
     let mut cameras = Vec::new();
@@ -350,22 +335,26 @@ pub fn main() {
         Color::RGB(255, 255, 255),
     );
 
-    let seed_text = TextGUI::new(
-        &format!("SEED: {}", game.seed()),
-        &text_font,
-        Color::RGB(255, 255, 255),
-    );
+    let seed_text = game.seed().map(|seed| {
+        TextGUI::new(
+            &format!("SEED: {}", seed),
+            &text_font,
+            Color::RGB(255, 255, 255),
+        )
+    });
 
     // Cache the text textures in advance
     hold_space_text
         .cache(&texture_creator, &mut texture_cache)
         .ok();
-    seed_text.cache(&texture_creator, &mut texture_cache).ok();
+    seed_text
+        .as_ref()
+        .and_then(|text| text.cache(&texture_creator, &mut texture_cache).ok());
 
     // Initialize an FPS sample queue to monitor average FPS across 3 seconds
-    let mut fps_sample: VecDeque<f32> = VecDeque::with_capacity(3 * GAME_FPS as usize);
-    for _ in 0..(3 * GAME_FPS as usize) {
-        fps_sample.push_back(GAME_FPS);
+    let mut fps_sample: VecDeque<f32> = VecDeque::with_capacity(3 * game_fps as usize);
+    for _ in 0..(3 * game_fps as usize) {
+        fps_sample.push_back(game_fps);
     }
 
     // Initialize the event pump for handling SDL events
@@ -453,9 +442,13 @@ pub fn main() {
             .is_err();
 
         failed_rendering |= seed_text
-            .cached_render_onto(&mut canvas, &texture_creator, &mut texture_cache, (10, 10))
-            .map_err(|e| eprintln!("Failed to render the seed text: {:?}", e))
-            .is_err();
+            .as_ref()
+            .map(|text| {
+                text.cached_render_onto(&mut canvas, &texture_creator, &mut texture_cache, (10, 10))
+                    .map_err(|e| eprintln!("Failed to render the seed text: {:?}", e))
+                    .is_err()
+            })
+            .unwrap_or(false);
 
         if REGULAR_LOG_PERF {
             timestamps.push(time.elapsed().as_micros());
@@ -503,7 +496,7 @@ pub fn main() {
         let mut slept: bool = false;
         if !DEBUG_MAX_FPS {
             let frame_duration: Duration =
-                Duration::new(0, (1_000_000_000f32 / GAME_FPS).round() as u32);
+                Duration::new(0, (1_000_000_000f32 / game_fps).round() as u32);
             if let Some(remaining_time) = frame_duration.checked_sub(time.elapsed()) {
                 std::thread::sleep(remaining_time);
                 slept = true;
@@ -520,7 +513,7 @@ pub fn main() {
             REGULAR_LOG_PERF && game.game_tick().is_multiple_of(REGULARITY_INTERVAL);
 
         // If average frame rate drops below 80% of the frame target, log a warning
-        if average_fps < 0.8 * GAME_FPS {
+        if average_fps < 0.8 * game_fps {
             eprintln!(
                 "Warning: Average FPS dropped below 80% of the target on frame {}.",
                 game.game_tick()
@@ -546,7 +539,7 @@ pub fn main() {
             println!(
                 "Frame duration (sleep excluded): {} µs -> {:.2}% of frame target",
                 frame_duration,
-                100.0 * frame_duration as f32 / (1_000_000.0 / GAME_FPS)
+                100.0 * frame_duration as f32 / (1_000_000.0 / game_fps)
             );
             if slept {
                 println!("The game slept this frame.");
@@ -560,7 +553,7 @@ pub fn main() {
                     "{}: {} µs -> {:.1}% of frame target",
                     DEBUG_PERFORMANCE_LABELS[i],
                     timestamp - last_timestamp,
-                    100.0 * (timestamp - last_timestamp) as f32 / (1_000_000.0 / GAME_FPS)
+                    100.0 * (timestamp - last_timestamp) as f32 / (1_000_000.0 / game_fps)
                 );
                 last_timestamp = *timestamp;
             }

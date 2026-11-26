@@ -191,6 +191,8 @@ impl WorldVector {
     }
 
     pub fn normalized(&self) -> WorldVector {
+        // TODO : A normalized vector should not be a WorldVector
+        // it should be a unit vector type instead (no use of Meter)
         let norm = self.norm().value();
         if norm == 0. {
             WorldVector::zero()
@@ -218,6 +220,11 @@ impl WorldVector {
             vector: *self,
             color,
         }
+    }
+
+    pub fn dot(&self, other: &WorldVector) -> Meter {
+        // TODO: The dot product of two world vectors returns an area (m^2)
+        Meter::new(self.x.0 * other.x.0 + self.y.0 * other.y.0)
     }
 }
 

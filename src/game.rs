@@ -476,11 +476,41 @@ impl Car {
         // Update the car's coordinates based on its current acceleration and velocity
         self.update_coords(dt);
     }
+
+    pub fn coords(&self) -> WorldCoords {
+        self.coords
+    }
+
+    pub fn velocity(&self) -> WorldVector {
+        self.velocity_vector
+    }
+
+    pub fn direction(&self) -> WorldVector {
+        self.direction_vec
+    }
+
+    pub fn acceleration(&self) -> WorldVector {
+        self.engine_acc_vector
+    }
+
+    pub fn curr_friction_factor(&self) -> f32 {
+        self.curr_friction_factor
+    }
 }
 
+#[derive(Clone, Copy)]
 pub struct PlayerDecision {
     pub direction: WorldVector,
     pub accelerate: bool,
+}
+
+impl Default for PlayerDecision {
+    fn default() -> Self {
+        Self {
+            direction: WorldVector::zero(),
+            accelerate: false,
+        }
+    }
 }
 
 pub struct Player {
